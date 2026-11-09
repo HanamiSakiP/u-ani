@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0b0d14" />
+  <title>uani · 番剧管理</title>
+  <link rel="stylesheet" href="/assets/app.css?v=6" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <span class="brand-mark">u</span>
+        <span class="brand-text">uani</span>
+      </div>
+      <nav class="nav" id="nav">
+        <a class="nav-item" href="#/subscriptions" data-route="subscriptions">
+          <span class="nav-icon">▦</span><span>追番</span>
+        </a>
+        <a class="nav-item" href="#/calendar" data-route="calendar">
+          <span class="nav-icon">◷</span><span>放送日历</span>
+        </a>
+        <a class="nav-item" href="#/timeline" data-route="timeline">
+          <span class="nav-icon">◫</span><span>Kazumi 时间表</span>
+        </a>
+        <a class="nav-item" href="#/recommend" data-route="recommend">
+          <span class="nav-icon">★</span><span>Kazumi 推荐</span>
+        </a>
+        <a class="nav-item" href="#/files" data-route="files">
+          <span class="nav-icon">▤</span><span>Kazumi Files</span>
+        </a>
+        <a class="nav-item" href="#/settings" data-route="settings">
+          <span class="nav-icon">⚙</span><span>设置</span>
+        </a>
+      </nav>
+      <div class="sidebar-footer">
+        <button class="token-chip" id="token-chip" type="button">
+          <span class="dot" id="token-dot"></span>
+          <span id="token-label">未设置管理令牌</span>
+        </button>
+        <div class="version" id="app-version">uani</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn mobile-only" id="menu-toggle" type="button" aria-label="菜单">☰</button>
+        <div>
+          <h1 id="page-title">我的订阅</h1>
+          <p class="page-subtitle" id="page-subtitle">管理正在追的番剧</p>
+        </div>
+        <div class="topbar-actions" id="topbar-actions"></div>
+      </header>
+      <section class="view" id="view"></section>
+    </main>
+  </div>
+
+  <div class="toast-stack" id="toast-stack"></div>
+
+  <dialog class="dialog" id="token-dialog">
+    <form method="dialog" class="dialog-card" id="token-form">
+      <h2>管理令牌</h2>
+      <p class="muted">管理操作需要 <code>http.admin_token</code>。令牌只保存在当前浏览器。</p>
+      <label class="field">
+        <span>Admin Token</span>
+        <input id="token-input" type="password" autocomplete="off" placeholder="Bearer token" />
+      </label>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel" type="button" id="token-cancel">取消</button>
+        <button class="btn primary" value="save" type="submit">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="dialog" id="modal">
+    <button class="modal-close" id="modal-close" type="button" aria-label="关闭">×</button>
+    <div class="dialog-card wide" id="modal-body"></div>
+  </dialog>
+
+  <dialog class="dialog" id="notice-dialog">
+    <div class="dialog-card notice-card">
+      <div class="notice-icon" id="notice-icon">!</div>
+      <h2 id="notice-title">提示</h2>
+      <div class="muted" id="notice-text"></div>
+      <div class="dialog-actions"><button class="btn primary" id="notice-ok" type="button">知道了</button></div>
+    </div>
+  </dialog>
+
+  <dialog class="dialog image-dialog" id="image-dialog">
+    <div class="dialog-card image-card">
+      <button class="modal-close" id="image-close" type="button" aria-label="关闭">×</button>
+      <img id="image-preview" alt="" />
+      <div class="image-caption" id="image-caption"></div>
+    </div>
+  </dialog>
+
+  <dialog class="dialog" id="loading-dialog">
+    <div class="dialog-card loading-card">
+      <div style="display:flex;align-items:center;gap:12px;justify-content:center"><span class="spin"></span><span id="loading-text">加载中…</span></div>
+      <div class="progress"><i id="loading-progress" style="width:0%"></i></div>
+      <div class="muted small" id="loading-percent">0%</div>
+    </div>
+  </dialog>
+
+  <script src="/assets/app.js?v=6"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+/uani
+/u-ani
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+.cover/
+.DS_Store
