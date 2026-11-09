@@ -76,6 +76,9 @@ func Run(address string, port int, options Options) error {
 		}
 	}
 	addr := net.JoinHostPort(address, strconv.Itoa(port))
+	if err := ensurePortFree(addr, port); err != nil {
+		return err
+	}
 	server := &http.Server{
 		Addr:              addr,
 		Handler:           HandlerWithOptions(options),

@@ -353,7 +353,12 @@ func loadCachedSection(subjectID int, section string, fetch func() (any, error))
 		}
 		return nil, err
 	}
-	payload = controllers.CachePayloadImages(payload)
+	if section == "staff" || section == "comments" {
+		// Only cover, character and relation images are cached locally.
+		payload = controllers.LocalizePayloadImages(payload)
+	} else {
+		payload = controllers.CachePayloadImages(payload)
+	}
 	if data, err := json.Marshal(payload); err == nil {
 		if cache == nil {
 			cache = &db.BangumiCache{SubjectID: int64(subjectID)}

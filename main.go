@@ -820,6 +820,40 @@ var httpCmd = &cobra.Command{
 	},
 }
 
+func stopWebServer(cmd *cobra.Command, args []string) error {
+	port, _ := cmd.Flags().GetInt("port")
+	pids, err := httpserver.Stop(port)
+	if err != nil {
+		return err
+	}
+	if len(pids) == 0 {
+		fmt.Printf("No process is listening on port %d.\n", port)
+		return nil
+	}
+	parts := make([]string, 0, len(pids))
+	for _, pid := range pids {
+		parts = append(parts, fmt.Sprintf("%d", pid))
+	}
+	fmt.Printf("Stopped web server on port %d (PID: %s).\n", port, strings.Join(parts, ", "))
+	return nil
+}
+
+var stopCmd = &cobra.Command{
+	Use:     "stop",
+	Aliases: []string{"kill-web"},
+	Short:   "Stop the running uani web/HTTP server.",
+	Args:    cobra.NoArgs,
+	RunE:    stopWebServer,
+}
+
+var httpStopCmd = &cobra.Command{
+	Use:     "stop",
+	Aliases: []string{"kill"},
+	Short:   "Stop the running uani web/HTTP server.",
+	Args:    cobra.NoArgs,
+	RunE:    stopWebServer,
+}
+
 var coverCmd = &cobra.Command{
 	Use:   "cover",
 	Short: "Download bangumi covers to local storage.",
@@ -1632,12 +1666,16 @@ func init() {
 
 	rootCmd.AddCommand(postprocessCmd)
 
-	httpCmd.Flags().IntP("port", "p", 8888, "Port to listen on.")
-	httpCmd.Flags().StringP("address", "a", "0.0.0.0", "Address to bind.")
+	httpCmd.PersistentFlags().IntP("port", "p", 8888, "Port to listen on.")
+	httpCmd.PersistentFlags().StringP("address", "a", "0.0.0.0", "Address to bind.")
 	httpCmd.Flags().Bool("no-web", false, "Disable the embedded Web UI.")
 	httpCmd.Flags().Bool("no-mcp", false, "Disable MCP endpoints.")
 	httpCmd.Flags().Bool("api-only", false, "Expose only the JSON API and media endpoints.")
+	httpCmd.AddCommand(httpStopCmd)
 	rootCmd.AddCommand(httpCmd)
+
+	stopCmd.Flags().IntP("port", "p", 8888, "Port of the running web server.")
+	rootCmd.AddCommand(stopCmd)
 	rootCmd.AddCommand(coverCmd)
 
 	kazumiInstallCmd.Flags().Bool("all", false, "Install every rule in the repository.")

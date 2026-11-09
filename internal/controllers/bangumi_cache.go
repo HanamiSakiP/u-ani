@@ -21,7 +21,10 @@ type BangumiCacheSummary struct {
 
 // CacheFollowedBangumi downloads covers and complete Bangumi metadata
 // (overview, characters, staff, relations, comments) for every followed
-// bangumi. When refresh is false, already cached subjects are skipped.
+// bangumi. Only cover, character (including voice actor) and relation images
+// are downloaded locally; staff and comment images stay remote unless they
+// already exist in the local cache. When refresh is false, already cached
+// subjects are skipped.
 func CacheFollowedBangumi(refresh bool) (BangumiCacheSummary, error) {
 	summary := BangumiCacheSummary{}
 	if err := ensureDB(); err != nil {
@@ -77,9 +80,6 @@ func CacheFollowedBangumi(refresh bool) (BangumiCacheSummary, error) {
 			continue
 		}
 		_ = db.Conn.SaveBangumiLink(item.BangumiName, subjectID)
-		if cover := subject.CoverURL(); cover != "" {
-			utils.DownloadCover([]string{cover})
-		}
 		cache := &db.BangumiCache{SubjectID: int64(subjectID)}
 		if existing, err := db.Conn.GetBangumiCache(int64(subjectID)); err == nil && existing != nil {
 			*cache = *existing
@@ -92,33 +92,33 @@ func CacheFollowedBangumi(refresh bool) (BangumiCacheSummary, error) {
 				cache.Characters = string(data)
 			}
 		} else {
-			cache.Characters = cacheExistingImages(cache.Characters)
+			cache.Characters = localizeExistingImages(cache.Characters)
 		}
 		if items, err := bgmtv.FetchStaff(subjectID); err == nil {
-			if data, err := json.Marshal(cacheImages(cachedStaffPayload(items))); err == nil {
+			if data, err := json.Marshal(localizeCacheImages(cachedStaffPayload(items))); err == nil {
 				cache.Staff = string(data)
 			}
 		} else {
-			cache.Staff = cacheExistingImages(cache.Staff)
+			cache.Staff = localizeExistingImages(cache.Staff)
 		}
 		if items, err := bgmtv.FetchRelations(subjectID); err == nil {
 			if data, err := json.Marshal(cacheImages(cachedRelationPayload(items))); err == nil {
 				cache.Relations = string(data)
 			}
 		} else {
-			cache.Relations = cacheExistingImages(cache.Relations)
+			cache.Relations = localizeExistingImages(cache.Relations)
 		}
 		if commentsAvailable {
 			if page, err := bgmtv.FetchComments(subjectID, 0, 20); err == nil {
-				if data, err := json.Marshal(cacheImages(cachedCommentPayload(page))); err == nil {
+				if data, err := json.Marshal(localizeCacheImages(cachedCommentPayload(page))); err == nil {
 					cache.Comments = string(data)
 				}
 			} else {
 				commentsAvailable = false
-				cache.Comments = cacheExistingImages(cache.Comments)
+				cache.Comments = localizeExistingImages(cache.Comments)
 			}
 		} else {
-			cache.Comments = cacheExistingImages(cache.Comments)
+			cache.Comments = localizeExistingImages(cache.Comments)
 		}
 		if err := db.Conn.SaveBangumiCache(cache); err != nil {
 			summary.Failed++
@@ -223,7 +223,7 @@ func CacheSummaryText(summary BangumiCacheSummary) string {
 		summary.Updated, summary.Skipped, summary.Failed, summary.Total, time.Now().Format("15:04:05"))
 }
 
-func cacheExistingImages(raw string) string {
+func localizeExistingImages(raw string) string {
 	if raw == "" {
 		return raw
 	}
@@ -231,15 +231,18 @@ func cacheExistingImages(raw string) string {
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		return raw
 	}
-	data, err := json.Marshal(cacheImages(payload))
+	data, err := json.Marshal(localizeCacheImages(payload))
 	if err != nil {
 		return raw
 	}
 	return string(data)
 }
 
+// cacheHasRemoteImages reports whether cache sections that are downloaded
+// locally still contain remote image URLs. Staff and comment images are not
+// downloaded, so they do not make the cache stale.
 func cacheHasRemoteImages(cache *db.BangumiCache) bool {
-	for _, raw := range []string{cache.Overview, cache.Characters, cache.Staff, cache.Relations, cache.Comments} {
+	for _, raw := range []string{cache.Overview, cache.Characters, cache.Relations} {
 		if raw == "" {
 			continue
 		}
@@ -261,6 +264,13 @@ func CachePayloadImages(payload any) any {
 	return cacheImages(payload)
 }
 
+// LocalizePayloadImages rewrites images that already exist locally without
+// downloading any new ones. It is used for sections whose images are not
+// cached locally (staff and comments).
+func LocalizePayloadImages(payload any) any {
+	return localizeCacheImages(payload)
+}
+
 func cacheImages(payload any) any {
 	urls := map[string]bool{}
 	collectCacheImages(payload, urls)
@@ -271,6 +281,12 @@ func cacheImages(payload any) any {
 		}
 		utils.DownloadCover(values)
 	}
+	return rewriteCacheImages(payload, urls)
+}
+
+func localizeCacheImages(payload any) any {
+	urls := map[string]bool{}
+	collectCacheImages(payload, urls)
 	return rewriteCacheImages(payload, urls)
 }
 

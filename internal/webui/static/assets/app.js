@@ -33,9 +33,11 @@
     timeline: { days: [], day: "" },
     recommend: { tag: "", query: "", subjects: [] },
     files: { tab: "tasks", tasks: [], files: [], rules: [], catalog: [], catalogLoaded: false, settings: null, loaded: false },
-    detail: { subjectId: 0, subject: null, local: null, name: "", tab: "overview", sections: {}, collectionType: 0, collectionLoaded: false },
+    detail: { subjectId: 0, subject: null, local: null, name: "", tab: "overview", sections: {}, collectionType: 0, collectionLoaded: false, navItems: [], navIndex: -1 },
     watch: { name: "", loading: false, sources: [], selected: null, roads: [], error: "" },
     player: null,
+    playerContext: null,
+    image: { items: [], index: 0 },
     preloaded: [],
     timer: null,
   };
@@ -161,7 +163,10 @@
     else dialog.setAttribute("open", "");
   }
   function closeDialog(dialog) {
-    if (dialog === modal) stopVideoPlayback();
+    if (dialog === modal) {
+      stopVideoPlayback();
+      modalBody.classList.remove("player-mode");
+    }
     if (typeof dialog.close === "function") dialog.close();
     else dialog.removeAttribute("open");
   }
@@ -244,13 +249,19 @@
         importFollows();
         break;
       case "open-show":
-        await openShow(target.dataset.id);
+        await openShow(target.dataset.id, target);
         break;
       case "open-local-watch":
         await openLocalWatch(target.dataset.id, target.dataset.name);
         break;
       case "open-image":
         openImageDialog(target.dataset.src, target.dataset.title);
+        break;
+      case "image-prev":
+        stepImage(-1);
+        break;
+      case "image-next":
+        stepImage(1);
         break;
       case "watch-online":
         await startWatchingOnline(target.dataset.name);
@@ -259,20 +270,13 @@
         await openSubjectDetail({ subjectId: Number(target.dataset.id) });
         break;
       case "open-calendar-item":
-        await openSubjectDetail({
-          name: target.dataset.name,
-          local: {
-            name: target.dataset.name,
-            cover: target.dataset.cover,
-            update_day: target.dataset.day,
-            episode: Number(target.dataset.episode || 0),
-            subtitle_group: (target.dataset.subtitles || "").split(",").filter(Boolean),
-            status: Number(target.dataset.status || 0),
-          },
-        });
+        await openCalendarCard(target);
         break;
       case "detail-tab":
         await switchDetailTab(target.dataset.tab);
+        break;
+      case "detail-nav":
+        await navigateDetail(Number(target.dataset.delta || 0));
         break;
       case "detail-retry":
         state.detail.sections[target.dataset.tab] = null;
@@ -330,7 +334,10 @@
         await deleteShow(target.dataset.name);
         break;
       case "play-episode":
-        openPlayer(target.dataset.path, target.dataset.title);
+        openDetailEpisode(target);
+        break;
+      case "player-episode":
+        openPlayer(target.dataset.path, target.dataset.title, false, { ...(state.playerContext || {}), current: target.dataset.episode });
         break;
       case "kazumi-install":
         await installRule(target.dataset.name);
@@ -536,7 +543,7 @@
   function filteredCardsHtml() {
     const filtered = filteredSubscriptions();
     if (!filtered.length) return emptyState("▦", state.subscriptionFilter === "all" ? "没有匹配的追番" : "当前分类下没有番剧");
-    return `<div class="grid card-grid">${filtered.map((item) => showCard(item)).join("")}</div>`;
+    return `<div class="grid card-grid">${filtered.map((item, index) => showCard(item, index)).join("")}</div>`;
   }
 
   function episodeSummary(item, downloadedOnly = false) {
@@ -560,13 +567,13 @@
     return `${episodes.length} 集 · ${parts.slice(0, 10).join(",")}${parts.length > 10 ? "…" : ""}`;
   }
 
-  function showCard(item) {
+  function showCard(item, index = -1) {
     const update = Number(item.status) === 2 ? '<span class="badge good">有更新</span>' : "";
     const cached = item.downloaded ? '<span class="badge good">已缓存</span>' : "";
     const follow = { 1: "想看", 2: "看过", 3: "在看", 4: "搁置", 5: "抛弃" }[Number(item.collection_type || 3)] || "在看";
     const cover = coverURL(item.cover);
     return `
-      <article class="show-card" data-action="open-show" data-id="${esc(item.id || item.bangumi_name)}">
+      <article class="show-card" data-action="open-show" data-id="${esc(item.id || item.bangumi_name)}" data-card-index="${index}">
         <div class="cover-wrap">
           <div class="cover-fallback">${esc((item.bangumi_name || "?").slice(0, 1))}</div>
           ${cover ? `<img class="cover" loading="eager" src="${esc(cover)}" alt="${esc(item.bangumi_name)}" onerror="this.remove()" />` : ""}
@@ -581,10 +588,15 @@
       </article>`;
   }
 
-  async function openShow(id) {
+  async function openShow(id, target) {
     const payload = await api(`/api/player/${encodeURIComponent(id)}`);
     const item = payload.data || {};
-    await openSubjectDetail({ name: item.bangumi_name, local: item });
+    const list = filteredSubscriptions();
+    let navIndex = target ? Number(target.dataset.cardIndex) : -1;
+    if (!Number.isInteger(navIndex) || navIndex < 0 || navIndex >= list.length) navIndex = -1;
+    const navItems = list.map((entry) => ({ name: entry.bangumi_name, local: entry }));
+    if (navIndex >= 0) navItems[navIndex] = { name: item.bangumi_name || list[navIndex].bangumi_name, local: item };
+    await openSubjectDetail({ name: item.bangumi_name, local: item, navItems, navIndex });
   }
 
   function stopVideoPlayback() {
@@ -600,24 +612,112 @@
     }
   }
 
-  function openImageDialog(src, title = "") {
-    if (!src) return;
-    if (imagePreview) imagePreview.src = src;
-    if (imageCaption) imageCaption.textContent = title;
-    if (imageDialog) openDialog(imageDialog);
+  function collectGalleryImages() {
+    const root = modal.open ? modalBody : view;
+    return $$('[data-action="open-image"]', root)
+      .map((node) => ({
+        src: node.dataset.src || node.getAttribute("src") || node.currentSrc || "",
+        title: node.dataset.title || node.getAttribute("alt") || "",
+      }))
+      .filter((item) => item.src);
   }
 
-  function openPlayer(path, title, absolute = false) {
+  function openImageDialog(src, title = "") {
+    if (!src) return;
+    const items = collectGalleryImages();
+    let index = items.findIndex((item) => item.src === src);
+    if (index < 0) {
+      items.unshift({ src, title });
+      index = 0;
+    }
+    state.image = { items, index };
+    renderImageDialog();
+    openDialog(imageDialog);
+  }
+
+  function renderImageDialog() {
+    const items = state.image.items || [];
+    const index = Math.max(0, Math.min(Number(state.image.index) || 0, items.length - 1));
+    const item = items[index] || {};
+    state.image.index = index;
+    if (imagePreview) {
+      imagePreview.src = item.src || "";
+      imagePreview.alt = item.title || "";
+    }
+    if (imageCaption) {
+      const title = item.title || "图片";
+      imageCaption.textContent = items.length > 1 ? `${title} · ${index + 1} / ${items.length}` : title;
+    }
+    const many = items.length > 1;
+    const prev = document.getElementById("image-prev");
+    const next = document.getElementById("image-next");
+    if (prev) prev.classList.toggle("hidden", !many);
+    if (next) next.classList.toggle("hidden", !many);
+  }
+
+  function stepImage(delta) {
+    const items = state.image.items || [];
+    if (items.length < 2 || !delta) return;
+    state.image.index = (state.image.index + delta + items.length) % items.length;
+    renderImageDialog();
+  }
+
+  document.addEventListener("keydown", (event) => {
+    if (!imageDialog || !imageDialog.open) return;
+    if (event.key === "ArrowLeft") { event.preventDefault(); stepImage(-1); }
+    else if (event.key === "ArrowRight") { event.preventDefault(); stepImage(1); }
+  });
+
+
+  function playerEpisodesTemplate(context) {
+    const episodes = context && Array.isArray(context.episodes) ? context.episodes : [];
+    if (!episodes.length) return "";
+    const current = String(context.current || "");
+    return `
+      <div class="player-episodes">
+        <div class="panel-head" style="margin-top:16px">
+          <h3>本地剧集</h3>
+          <span class="badge good">已缓存 ${episodes.length} 集</span>
+        </div>
+        <div class="episode-grid">${episodes.map((entry) => {
+          const episode = String(entry.episode);
+          return `<button class="episode-btn ${episode === current ? "active" : ""}" data-action="player-episode" data-path="${esc(entry.path)}" data-title="${esc(entry.title || `第 ${episode} 集`)}" data-episode="${esc(episode)}">第 ${esc(episode)} 集</button>`;
+        }).join("")}</div>
+      </div>`;
+  }
+
+  function detailPlayerContext() {
+    const local = state.detail.local || {};
+    const name = local.bangumi_name || local.name || state.detail.name || "本地视频";
+    const episodes = localPlayerEntries()
+      .map((episode) => {
+        const entry = local.player[episode] || {};
+        return { episode, path: entry.path || "", title: `${name} EP${episode}` };
+      })
+      .filter((entry) => entry.path);
+    return { name, episodes, current: "" };
+  }
+
+  function openDetailEpisode(target) {
+    const context = detailPlayerContext();
+    context.current = String(target.dataset.episode || "");
+    openPlayer(target.dataset.path, target.dataset.title, false, context);
+  }
+
+  function openPlayer(path, title, absolute = false, context = null) {
     stopVideoPlayback();
+    modalBody.classList.add("player-mode");
+    state.playerContext = context && Array.isArray(context.episodes) ? context : null;
     const isAbsolute = absolute || /^https?:\/\//i.test(path) || /^\/(?:kazumi-files|bangumi)\//.test(path);
     const src = isAbsolute ? path : `/bangumi${path.startsWith("/") ? "" : "/"}${path}`;
     const isHLS = /\.m3u8(\?|$)/i.test(src);
     modalBody.innerHTML = `
-      <div class="panel-head"><h2>${esc(title || "播放")}</h2><div class="spacer"></div><a class="btn small" href="${esc(src)}" target="_blank" rel="noopener">新窗口打开</a></div>
+      <div class="panel-head player-head"><h2>${esc(title || "播放")}</h2>${state.playerContext ? `<span class="badge good">已缓存 ${state.playerContext.episodes.length} 集</span>` : ""}<div class="spacer"></div><a class="btn small" href="${esc(src)}" target="_blank" rel="noopener">新窗口打开</a></div>
       <video class="player" id="player-video" controls autoplay></video>
       <p class="muted small">${isHLS ? "HLS 流媒体需要浏览器支持；已尝试使用 hls.js。" : "浏览器不支持的格式（如 MKV）请使用新窗口打开或本地播放器。"}</p>
+      ${playerEpisodesTemplate(state.playerContext)}
     `;
-    openDialog(modal);
+    if (!modal.open && !modal.hasAttribute("open")) openDialog(modal);
     const video = document.getElementById("player-video");
     if (!video) return;
     const attach = () => {
@@ -774,8 +874,8 @@
       return `
         <section class="panel" id="day-${day}">
           <div class="panel-head"><h2>${dayName(day)}</h2><span class="badge ${day === todayKey ? "good" : "muted"}">${items.length} 部</span></div>
-          ${items.length ? `<div class="grid card-grid">${items.map((item) => `
-            <article class="show-card" data-action="open-calendar-item" data-name="${esc(item.name)}" data-cover="${esc(item.cover || "")}" data-day="${esc(item.update_day || "")}" data-episode="${Number(item.episode || 0)}" data-subtitles="${esc((item.subtitle_group || []).join(","))}" data-status="${Number(item.status || 0)}">
+          ${items.length ? `<div class="grid card-grid">${items.map((item, index) => `
+            <article class="show-card" data-action="open-calendar-item" data-name="${esc(item.name)}" data-cover="${esc(item.cover || "")}" data-day="${esc(item.update_day || "")}" data-list-day="${esc(day)}" data-card-index="${index}" data-episode="${Number(item.episode || 0)}" data-subtitles="${esc((item.subtitle_group || []).join(","))}" data-status="${Number(item.status || 0)}">
               <div class="cover-wrap">
                 <div class="cover-fallback">${esc((item.name || "?").slice(0, 1))}</div>
                 ${item.cover ? `<img class="cover" loading="eager" src="${esc(coverURL(item.cover))}" alt="" onerror="this.remove()" />` : ""}
@@ -787,6 +887,43 @@
             </article>`).join("")}</div>` : `<p class="muted small">今天没有放送。</p>`}
         </section>`;
     }).join("")}</div>`;
+  }
+
+
+  function calendarDetailOption(item) {
+    return {
+      name: item.name,
+      local: {
+        name: item.name,
+        cover: item.cover || "",
+        update_day: item.update_day || "",
+        episode: Number(item.episode || 0),
+        subtitle_group: Array.isArray(item.subtitle_group) ? item.subtitle_group : [],
+        status: Number(item.status || 0),
+      },
+    };
+  }
+
+  async function openCalendarCard(target) {
+    const day = target.dataset.listDay || "";
+    const items = Array.isArray(state.calendar[day]) ? state.calendar[day] : [];
+    const navItems = items.map(calendarDetailOption);
+    let navIndex = Number(target.dataset.cardIndex);
+    if (!Number.isInteger(navIndex) || navIndex < 0 || navIndex >= navItems.length) navIndex = -1;
+    const current = navIndex >= 0
+      ? navItems[navIndex]
+      : {
+        name: target.dataset.name,
+        local: {
+          name: target.dataset.name,
+          cover: target.dataset.cover,
+          update_day: target.dataset.day,
+          episode: Number(target.dataset.episode || 0),
+          subtitle_group: (target.dataset.subtitles || "").split(",").filter(Boolean),
+          status: Number(target.dataset.status || 0),
+        },
+      };
+    await openSubjectDetail({ ...current, navItems, navIndex });
   }
 
 
@@ -953,9 +1090,13 @@
   ];
 
   async function openSubjectDetail(options = {}) {
+    modalBody.classList.remove("player-mode");
     const local = options.local || null;
     const name = String(options.name || (local && local.bangumi_name) || (local && local.name) || "").trim();
     const subjectId = Number(options.subjectId || 0);
+    const navItems = Array.isArray(options.navItems) ? options.navItems : [];
+    let navIndex = Number(options.navIndex);
+    if (!Number.isInteger(navIndex) || navIndex < 0 || navIndex >= navItems.length) navIndex = -1;
     state.detail = {
       subjectId,
       subject: null,
@@ -965,6 +1106,8 @@
       sections: {},
       collectionType: local && local.bangumi_name ? Number(local.collection_type || 3) : 0,
       collectionLoaded: false,
+      navItems,
+      navIndex,
     };
     modalBody.innerHTML = `<div class="empty"><span class="spin"></span><div class="muted small" style="margin-top:10px">正在加载详情…</div></div>`;
     openDialog(modal);
@@ -1017,6 +1160,27 @@
     return coverURL(localFirst);
   }
 
+  function detailNavigation() {
+    const items = state.detail.navItems || [];
+    const index = Number(state.detail.navIndex);
+    if (items.length < 2 || index < 0) return "";
+    return `
+      <div class="detail-nav">
+        <button class="btn small" data-action="detail-nav" data-delta="-1" ${index <= 0 ? "disabled" : ""}>‹ 上一部</button>
+        <span class="muted small">${index + 1} / ${items.length}</span>
+        <button class="btn small" data-action="detail-nav" data-delta="1" ${index >= items.length - 1 ? "disabled" : ""}>下一部 ›</button>
+      </div>`;
+  }
+
+  async function navigateDetail(delta) {
+    const items = state.detail.navItems || [];
+    const index = Number(state.detail.navIndex);
+    const next = index + Number(delta || 0);
+    if (!delta || index < 0 || next < 0 || next >= items.length) return;
+    modalBody.scrollTop = 0;
+    await openSubjectDetail({ ...items[next], navItems: items, navIndex: next });
+  }
+
   function renderDetail() {
     const subject = state.detail.subject || {};
     const local = state.detail.local || {};
@@ -1040,8 +1204,9 @@
         ${[["overview", "概述"], ["comments", "吐槽"], ["characters", "角色"], ["relations", "关联"], ["staff", "制作人员"]].map(([key, label]) => `<button class="tab ${state.detail.tab === key ? "active" : ""}" data-action="detail-tab" data-tab="${key}">${label}</button>`).join("")}
       </div>` : "";
     modalBody.innerHTML = `
+      ${detailNavigation()}
       <div class="detail-hero">
-        ${cover ? `<img class="cover" src="${esc(cover)}" alt="" onerror="this.remove()" />` : `<div class="cover-fallback">${esc(name.slice(0, 1))}</div>`}
+        ${cover ? `<img class="cover" src="${esc(cover)}" data-action="open-image" data-src="${esc(cover)}" data-title="${esc(name)}" alt="" onerror="this.remove()" />` : `<div class="cover-fallback">${esc(name.slice(0, 1))}</div>`}
         <div style="flex:1;min-width:0">
           <div class="chips" style="margin-bottom:8px">${localLine}</div>
           <h2>${esc(name)}</h2>
@@ -1098,7 +1263,7 @@
             ${(local.subtitle_group || []).length ? `<div>字幕组：${esc((local.subtitle_group || []).join(" / "))}</div>` : ""}
             ${local.regex ? `<div>正则过滤：<span class="mono">${esc(local.regex)}</span></div>` : ""}
           </div>
-          ${episodes.length ? `<div class="panel-head" style="margin-top:14px"><h3>本地剧集</h3><span class="muted small">${episodes.length} 集</span></div><div class="episode-grid">${episodes.map((ep) => `<button class="episode-btn" data-action="play-episode" data-title="${esc(local.bangumi_name || local.name)} EP${esc(ep)}" data-path="${esc(player[ep].path)}">第 ${esc(ep)} 集</button>`).join("")}</div>` : ""}
+          ${episodes.length ? `<div class="panel-head" style="margin-top:14px"><h3>本地剧集</h3><span class="muted small">${episodes.length} 集</span></div><div class="episode-grid">${episodes.map((ep) => `<button class="episode-btn" data-action="play-episode" data-episode="${esc(ep)}" data-title="${esc(local.bangumi_name || local.name)} EP${esc(ep)}" data-path="${esc(player[ep].path)}">第 ${esc(ep)} 集</button>`).join("")}</div>` : ""}
         </div>`;
     }
     const infoFields = Array.isArray(subject.info_fields) ? subject.info_fields : [];
@@ -1132,7 +1297,7 @@
     if (!items.length) return emptyState("…", "还没有吐槽");
     return `<div class="list">${items.map((item) => `
       <div class="comment-row">
-        ${item.user && item.user.cover ? `<img class="avatar" src="${esc(coverURL(item.user.cover))}" alt="" onerror="this.remove()" />` : `<div class="avatar avatar-fallback">${esc((item.user && (item.user.nickname || item.user.username) || "?").slice(0, 1))}</div>`}
+        ${item.user && item.user.cover ? `<img class="avatar" src="${esc(coverURL(item.user.cover))}" data-action="open-image" data-src="${esc(coverURL(item.user.cover))}" data-title="${esc(item.user.nickname || item.user.username || "")}" alt="" onerror="this.remove()" />` : `<div class="avatar avatar-fallback">${esc((item.user && (item.user.nickname || item.user.username) || "?").slice(0, 1))}</div>`}
         <div class="grow" style="flex:1;min-width:0">
           <div class="title">${esc(item.user && (item.user.nickname || item.user.username) || "匿名")} ${item.rate ? `<span class="badge warn">${item.rate} 分</span>` : ""}</div>
           <div class="comment-text">${esc(item.comment || "")}</div>
@@ -1267,7 +1432,7 @@
       <p class="muted small">直接播放 Kazumi Files / 本地目录中已经下载好的剧集，不再进行在线搜索。</p>
       <div class="episode-grid">${episodes.map((episode) => {
         const entry = local.player[episode] || {};
-        return `<button class="episode-btn" data-action="play-episode" data-title="${esc(name)} EP${esc(episode)}" data-path="${esc(entry.path || "")}">第 ${esc(episode)} 集</button>`;
+        return `<button class="episode-btn" data-action="play-episode" data-episode="${esc(episode)}" data-title="${esc(name)} EP${esc(episode)}" data-path="${esc(entry.path || "")}">第 ${esc(episode)} 集</button>`;
       }).join("")}</div>
     `;
     openDialog(modal);
@@ -2015,7 +2180,7 @@
   imageDialog.addEventListener("click", (event) => {
     if (event.target === imageDialog) closeDialog(imageDialog);
   });
-  modal.addEventListener("close", () => stopVideoPlayback());
+  modal.addEventListener("close", () => { stopVideoPlayback(); modalBody.classList.remove("player-mode"); });
   document.getElementById("token-chip").addEventListener("click", openTokenDialog);
   document.getElementById("token-cancel").addEventListener("click", () => closeDialog(tokenDialog));
   document.getElementById("token-form").addEventListener("submit", (event) => {

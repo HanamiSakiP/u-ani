@@ -410,9 +410,9 @@ textarea { resize: vertical; min-height: 220px; font-family: ui-monospace, SFMon
 
 /* Keep long tags/text inside the modal without horizontal scrolling */
 .chip, .badge, .person-name, .show-name, .title { overflow-wrap: anywhere; }
-#modal .dialog-card.wide { padding-top: 28px; padding-right: 30px; }
+#modal .dialog-card.wide { padding-top: 56px; padding-right: 30px; }
 @media (max-width: 640px) {
-  #modal .dialog-card.wide { padding-top: 48px; padding-right: 16px; }
+  #modal .dialog-card.wide { padding-top: 54px; padding-right: 16px; }
 }
 
 /* Watch episode list with play/download buttons */
@@ -517,3 +517,76 @@ textarea { resize: vertical; min-height: 220px; font-family: ui-monospace, SFMon
   width: 100%;
   max-width: 100%;
 }
+
+/* Image lightbox previous/next navigation */
+.image-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 3;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
+  background: rgba(11, 13, 20, .78);
+  color: var(--text);
+  font-size: 26px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  transition: background .16s ease, border-color .16s ease;
+}
+.image-nav:hover { background: rgba(139,124,255,.26); border-color: rgba(139,124,255,.55); }
+.image-nav.prev { left: 14px; }
+.image-nav.next { right: 14px; }
+.avatar[data-action="open-image"] { cursor: zoom-in; }
+@media (max-width: 640px) {
+  .image-nav { width: 34px; height: 34px; font-size: 21px; }
+  .image-nav.prev { left: 6px; }
+  .image-nav.next { right: 6px; }
+}
+
+/* Previous/next bangumi navigation in the detail dialog */
+.detail-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding-right: 20px;
+  flex-wrap: wrap;
+}
+.detail-nav .muted { margin-left: auto; margin-right: auto; }
+
+/* Video player card: reserve space for the close button and fit the viewport
+   without a visible vertical scrollbar. */
+.player-head { padding-right: 20px; }
+#modal .dialog-card.wide.player-mode {
+  max-height: min(92vh, calc(100dvh - 20px));
+  overflow: hidden;
+}
+.player-mode .player {
+  max-height: min(52vh, 520px);
+  object-fit: contain;
+}
+.player-mode .player-episodes {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.player-mode .player-episodes::-webkit-scrollbar { width: 0; height: 0; display: none; }
+@media (max-width: 640px) {
+  .player-mode .player { max-height: min(42vh, 360px); }
+  .player-head { padding-right: 0; }
+}
+
+/* Local episode list inside the video player */
+.player-episodes .episode-btn.active {
+  border-color: rgba(139,124,255,.65);
+  background: rgba(139,124,255,.2);
+  color: #fff;
+}
+.detail-hero .cover[data-action="open-image"] { cursor: zoom-in; }
