@@ -554,7 +554,9 @@ func validateRuleName(name string) error {
 	return nil
 }
 
-// TestBangumiMirror checks whether a mirror can serve the Bangumi calendar API.
+// TestBangumiMirror checks whether a mirror can serve core Bangumi APIs.
+// Comments are checked as a best-effort signal because many mirrors lack
+// p1 comments support even when calendar/search/subject endpoints work.
 func TestBangumiMirror(value string) (int, time.Duration, error) {
 	base, err := NormalizeBangumiMirror(value)
 	if err != nil {
@@ -566,12 +568,13 @@ func TestBangumiMirror(value string) (int, time.Duration, error) {
 	start := time.Now()
 	lastStatus := 0
 	var lastErr error
+	coreOK := false
 	for _, path := range []string{
 		"/p1/calendar",
 		"/search/subject/test?type=2&responseGroup=small&max_results=1",
 		"/v0/subjects/253",
 	} {
-		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
 		if err != nil {
 			cancel()
@@ -580,7 +583,6 @@ func TestBangumiMirror(value string) (int, time.Duration, error) {
 		req.Header.Set("User-Agent", "uani/1.0.0 (mirror test)")
 		req.Header.Set("Accept", "application/json")
 		resp, err := httpx.Client().Do(req)
-		elapsed := time.Since(start)
 		if err != nil {
 			cancel()
 			lastErr = err
@@ -619,7 +621,34 @@ func TestBangumiMirror(value string) (int, time.Duration, error) {
 				continue
 			}
 		}
-		return resp.StatusCode, elapsed, nil
+		coreOK = true
+		lastErr = nil
+		break
 	}
-	return lastStatus, time.Since(start), lastErr
+	if !coreOK {
+		return lastStatus, time.Since(start), lastErr
+	}
+	// Comments are not required for a mirror to be usable, but if it explicitly
+	// rejects the comments endpoint we surface that as a warning-capable error.
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/p1/subjects/253/comments?limit=1&offset=0", nil)
+	if err == nil {
+		req.Header.Set("User-Agent", "uani/1.0.0 (mirror test)")
+		req.Header.Set("Accept", "application/json")
+		if resp, err := httpx.Client().Do(req); err == nil {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			resp.Body.Close()
+			if resp.StatusCode < 400 {
+				var payload map[string]any
+				if json.Unmarshal(body, &payload) == nil {
+					if msg, ok := payload["error"].(string); ok && strings.TrimSpace(msg) != "" {
+						cancel()
+						return lastStatus, time.Since(start), fmt.Errorf("镜像可用，但吐槽接口不可用：%s", msg)
+					}
+				}
+			}
+		}
+	}
+	cancel()
+	return lastStatus, time.Since(start), nil
 }

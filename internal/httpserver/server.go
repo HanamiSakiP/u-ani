@@ -16,6 +16,7 @@ import (
 	"github.com/HanamiSakiP/u-ani/internal/config"
 	"github.com/HanamiSakiP/u-ani/internal/controllers"
 	"github.com/HanamiSakiP/u-ani/internal/db"
+	"github.com/HanamiSakiP/u-ani/internal/utils"
 	"github.com/HanamiSakiP/u-ani/internal/webui"
 )
 
@@ -48,12 +49,16 @@ func HandlerWithOptions(options Options) http.Handler {
 		mux.HandleFunc("/mcp/", http.NotFound)
 	}
 	mux.HandleFunc("/resource/calendar.ics", calendarICS)
+	mux.Handle("/covers/", http.StripPrefix("/covers/", staticHandler(utils.CoverCacheDir(), false)))
+	// Backward compatibility for cached payloads generated before the cover
+	// cache moved to cache_path/covers.
+	mux.Handle("/bangumi/.cover/", http.StripPrefix("/bangumi/.cover/", staticHandler(utils.CoverCacheDir(), false)))
 	mux.Handle("/bangumi/", http.StripPrefix("/bangumi/", staticHandler(config.Cfg.SavePath, false)))
 	mux.Handle("/kazumi-files/", http.StripPrefix("/kazumi-files/", staticHandler(controllers.KazumiFilesDir(), false)))
 
 	if !options.Web {
 		mux.HandleFunc("/", http.NotFound)
-		return mux
+		return WithMiddleware(mux)
 	}
 
 	// An installed legacy frontend wins when explicitly enabled. Otherwise the
@@ -61,11 +66,11 @@ func HandlerWithOptions(options Options) http.Handler {
 	if config.Cfg.HTTP.ServeStaticFiles {
 		if _, err := os.Stat(filepath.Join(config.Cfg.FrontStaticPath, "index.html")); err == nil {
 			mux.Handle("/", spaHandler(config.Cfg.FrontStaticPath))
-			return mux
+			return WithMiddleware(mux)
 		}
 	}
 	mux.Handle("/", webui.Handler())
-	return mux
+	return WithMiddleware(mux)
 }
 
 // Run starts the HTTP server and blocks until it exits.
@@ -93,6 +98,7 @@ func Run(address string, port int, options Options) error {
 		services = append(services, "mcp")
 	}
 	fmt.Printf("uani HTTP Server listening on %s (%s)\n", addr, strings.Join(services, "+"))
+	server.Handler = HandlerWithOptions(options)
 	return server.ListenAndServe()
 }
 

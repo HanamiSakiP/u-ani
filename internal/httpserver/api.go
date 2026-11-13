@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
-	"net/url"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -16,13 +15,14 @@ import (
 	"github.com/HanamiSakiP/u-ani/internal/config"
 	"github.com/HanamiSakiP/u-ani/internal/controllers"
 	"github.com/HanamiSakiP/u-ani/internal/db"
+	"github.com/HanamiSakiP/u-ani/internal/logger"
 	"github.com/HanamiSakiP/u-ani/internal/postprocessor"
 	"github.com/HanamiSakiP/u-ani/internal/script"
 	"github.com/HanamiSakiP/u-ani/internal/utils"
 )
 
 const (
-	coverURL       = "/bangumi/.cover"
+	coverURL       = "/covers"
 	scriptIDPrefix = "script:"
 )
 
@@ -34,11 +34,28 @@ func jsonify(data any) map[string]any {
 	}
 }
 
-func coverPath(s string) string {
+func localCoverPath(s string) string {
 	if s == "" {
 		return ""
 	}
-	return coverURL + "/" + utils.NormalizePath(s)
+	if _, file := utils.ConvertCoverURLToPath(s); utils.IsImage(file) {
+		return coverURL + "/" + utils.NormalizePath(s)
+	}
+	return ""
+}
+
+func coverPath(s string) string {
+	if p := localCoverPath(s); p != "" {
+		return p
+	}
+	if s == "" {
+		return ""
+	}
+	// Prefer showing cover info immediately: queue local caching in background
+	// and return the original URL so the frontend can display it (via image
+	// proxy when needed).
+	go controllers.EnsureCovers([]string{s})
+	return s
 }
 
 func scriptID(name string) string {
@@ -56,14 +73,16 @@ func sortedEpisodes(set map[int]bool) []int {
 }
 
 func followedItem(f *db.Followed, b *db.Bangumi) map[string]any {
-	kazumiEpisodes, kazumiPlayer := kazumiDownloadInfoForName(b.Name)
+	meta := itemMetaForName(b.Name)
+	kazumiEpisodes, kazumiPlayer := kazumiDownloadInfoForMeta(meta)
+	downloaded := len(kazumiEpisodes) > 0
 	return map[string]any{
 		"id":              b.ID,
 		"name":            b.Name,
 		"bangumi_name":    b.Name,
 		"subtitle_group":  nonNilStrings(b.SubtitleGroup),
 		"update_day":      b.UpdateDay,
-		"cover":           coverPath(b.Cover),
+		"cover":           localCoverPath(b.Cover),
 		"status":          f.Status,
 		"episodes":        sortedEpisodes(f.Episodes),
 		"episode":         f.Episode(),
@@ -76,14 +95,89 @@ func followedItem(f *db.Followed, b *db.Bangumi) map[string]any {
 		"episode_offset":  f.EpisodeOffset,
 		"display_name":    f.DisplayName,
 		"is_script":       f.IsScript,
-		"collection_type": collectionTypeForBangumi(b.Name),
-		"aliases":         aliasesForBangumiName(b.Name),
-		"custom_aliases":  customAliasesForBangumiName(b.Name),
-		"cached":          bangumiCachedForName(b.Name, len(kazumiEpisodes) > 0),
-		"downloaded":      len(kazumiEpisodes) > 0,
+		"collection_type": meta.collection,
+		"aliases":         meta.aliases,
+		"custom_aliases":  meta.customAliases,
+		"cached":          downloaded || meta.cached,
+		"downloaded":      downloaded,
 		"kazumi_episodes": kazumiEpisodes,
 		"player":          kazumiPlayer,
 	}
+}
+
+// itemMetaForName resolves aliases, subject link and collection state once so
+// that listing many subscriptions does not repeat the same SQLite queries.
+type itemMeta struct {
+	names         []string
+	subjectID     int
+	aliases       []string
+	customAliases []string
+	collection    int
+	cached        bool
+}
+
+func itemMetaForName(name string) itemMeta {
+	meta := itemMeta{names: []string{name}, collection: 3, customAliases: []string{}, aliases: []string{}}
+	if db.Conn == nil {
+		return meta
+	}
+	seenAlias := map[string]bool{"": true}
+	addAlias := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || seenAlias[value] {
+			return
+		}
+		seenAlias[value] = true
+		meta.aliases = append(meta.aliases, value)
+	}
+	if followed, err := db.Conn.GetFollowed(name); err == nil && followed.DisplayName != "" {
+		meta.names = append(meta.names, followed.DisplayName)
+	}
+	if manual, err := db.Conn.GetManualBangumi(name); err == nil {
+		for _, alias := range manual.SearchNames {
+			addAlias(alias)
+			meta.names = append(meta.names, alias)
+		}
+	}
+	if aliases, err := db.Conn.ListCustomAliases(name); err == nil {
+		meta.customAliases = aliases
+		for _, alias := range aliases {
+			addAlias(alias)
+			meta.names = append(meta.names, alias)
+		}
+	}
+	if subjectID, err := db.Conn.GetSubjectIDByBangumiName(name); err == nil && subjectID > 0 {
+		meta.subjectID = subjectID
+		if value, err := db.Conn.GetBangumiCollection(subjectID); err == nil && value > 0 {
+			meta.collection = value
+		}
+		if cache, err := db.Conn.GetBangumiCache(int64(subjectID)); err == nil && cache.Overview != "" {
+			meta.cached = true
+		}
+	}
+	return meta
+}
+
+func kazumiDownloadInfoForMeta(meta itemMeta) ([]int, map[string]map[string]string) {
+	player := map[string]map[string]string{}
+	if db.Conn == nil {
+		return []int{}, player
+	}
+	videos, _ := db.Conn.KazumiVideosForNames(meta.names, meta.subjectID)
+	if len(videos) == 0 {
+		controllers.RepairKazumiDownloadLinksOnce()
+		videos, _ = db.Conn.KazumiVideosForNames(meta.names, meta.subjectID)
+	}
+	episodes := make([]int, 0, len(videos))
+	for episode, relative := range videos {
+		episodes = append(episodes, episode)
+		player[strconv.Itoa(episode)] = map[string]string{
+			"path": kazumiPlayerPath(relative),
+			"kind": "kazumi",
+		}
+	}
+	sort.Ints(episodes)
+	return episodes, player
 }
 
 func kazumiNamesForName(name string) ([]string, int) {
@@ -135,11 +229,7 @@ func kazumiPlayerForName(name string) map[string]map[string]string {
 }
 
 func kazumiPlayerPath(relative string) string {
-	parts := strings.Split(filepath.ToSlash(relative), "/")
-	for i, part := range parts {
-		parts[i] = url.PathEscape(part)
-	}
-	return "/kazumi-files/" + strings.Join(parts, "/")
+	return "/kazumi-files/" + filepath.ToSlash(relative)
 }
 
 func mergedPlayer(name string, episodes []int, season, offset int, display string) map[string]map[string]string {
@@ -231,6 +321,8 @@ func apiRouter(w http.ResponseWriter, r *http.Request) {
 		handleImage(w, r)
 	case r.Method == http.MethodGet && path == "kazumi/timeline":
 		handleKazumiTimeline(w, r)
+	case r.Method == http.MethodGet && path == "kazumi/recommend/all":
+		handleKazumiRecommendCategories(w, r)
 	case r.Method == http.MethodGet && path == "kazumi/recommend":
 		handleKazumiRecommend(w, r)
 	case r.Method == http.MethodGet && path == "kazumi/lookup":
@@ -271,11 +363,19 @@ func handleIndex(w http.ResponseWriter, r *http.Request, kind string) {
 		return
 	}
 	old := kind == "old"
+	if r.URL.Query().Get("refresh") != "1" {
+		indexMu.Lock()
+		entry, ok := indexCache[kind]
+		indexMu.Unlock()
+		if ok && time.Since(entry.at) < 10*time.Second {
+			writeJSON(w, http.StatusOK, entry.payload)
+			return
+		}
+	}
 	if err := ensureDB(); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	ensureCoversAsync()
 	status := db.BangumiStatusUpdating
 	if old {
 		status = db.BangumiStatusEnd
@@ -285,23 +385,13 @@ func handleIndex(w http.ResponseWriter, r *http.Request, kind string) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	var coverURLs []string
-	for i := range list {
-		coverURLs = append(coverURLs, list[i].Bangumi.Cover)
-	}
-	if !old {
-		for _, model := range script.GetModels() {
-			coverURLs = append(coverURLs, model.Cover)
-		}
-	}
-	controllers.EnsureCovers(coverURLs)
 	data := make([]map[string]any, 0, len(list))
 	for i := range list {
 		data = append(data, bangumiSummary(followedItem(&list[i].Followed, &list[i].Bangumi)))
 	}
 
 	if !old {
-		// Refresh script metadata and append script entries.
+		// Append locally installed script entries.
 		models := script.GetModels()
 		for _, m := range models {
 			row, err := db.Conn.GetScript(m.Name)
@@ -313,7 +403,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request, kind string) {
 				"bangumi_name": m.Name,
 				"updated_time": row.UpdatedTime,
 				"status":       row.Status,
-				"cover":        m.Cover,
+				"cover":        localCoverPath(m.Cover),
 				"episodes":     sortedEpisodes(row.Episodes),
 				"episode":      row.Episode(),
 			}))
@@ -323,7 +413,26 @@ func handleIndex(w http.ResponseWriter, r *http.Request, kind string) {
 		sortByUpdated(data, true)
 	}
 
-	writeJSON(w, http.StatusOK, jsonify(data))
+	// 追番优先显示已经下载视频的封面信息并排在前面（仅本地信息）。
+	sort.SliceStable(data, func(i, j int) bool {
+		di, _ := data[i]["downloaded"].(bool)
+		dj, _ := data[j]["downloaded"].(bool)
+		if di != dj {
+			return di
+		}
+		ci, _ := data[i]["cover"].(string)
+		cj, _ := data[j]["cover"].(string)
+		if (ci != "") != (cj != "") {
+			return ci != ""
+		}
+		return false
+	})
+
+	payload := jsonify(data)
+	indexMu.Lock()
+	indexCache[kind] = indexCacheEntry{at: time.Now(), payload: payload}
+	indexMu.Unlock()
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func sortByUpdated(items []map[string]any, ascending bool) {
@@ -369,7 +478,7 @@ func handlePlayer(w http.ResponseWriter, r *http.Request, bangumiID string) {
 				"bangumi_name": m.Name,
 				"updated_time": row.UpdatedTime,
 				"status":       row.Status,
-				"cover":        m.Cover,
+				"cover":        localCoverPath(m.Cover),
 				"episodes":     sortedEpisodes(row.Episodes),
 				"episode":      row.Episode(),
 			}
@@ -419,23 +528,12 @@ func handleCalendar(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	ensureCoversAsync()
 	weekly, err := db.Conn.GetUpdatingBangumi(nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	var coverURLs []string
-	for _, items := range weekly {
-		for _, item := range items {
-			coverURLs = append(coverURLs, item.Cover)
-		}
-	}
-	controllers.EnsureCovers(coverURLs)
-	if len(weekly) == 0 {
-		writeError(w, http.StatusNotFound, `请使用 "uani cal --update" 命令更新番剧列表`)
-		return
-	}
+
 	out := map[string]any{
 		"sat": nil,
 		"sun": nil,
@@ -453,15 +551,46 @@ func handleCalendar(w http.ResponseWriter, r *http.Request) {
 			for _, sub := range subs {
 				subtitleNames = append(subtitleNames, sub.Name)
 			}
-			list = append(list, map[string]any{
+			entry := map[string]any{
 				"id":             item.ID,
-				"cover":          coverPath(item.Cover),
+				"cover":          localCoverPath(item.Cover),
 				"name":           item.Name,
 				"update_day":     item.UpdateDay,
 				"status":         nullableInt(item.FollowedStatus),
 				"episode":        nullableInt(item.Episode),
 				"subtitle_group": subtitleNames,
-			})
+			}
+			if item.FollowedStatus != nil {
+				if followed, err := db.Conn.GetFollowed(item.Name); err == nil {
+					installedSet := map[int]bool{}
+					for ep := range followed.Episodes {
+						installedSet[ep] = true
+					}
+					kazumi := kazumiEpisodesForName(item.Name)
+					for _, ep := range kazumi {
+						installedSet[ep] = true
+					}
+					installed := make([]int, 0, len(installedSet))
+					for ep := range installedSet {
+						installed = append(installed, ep)
+					}
+					sort.Ints(installed)
+					entry["followed"] = true
+					entry["installed_episodes"] = installed
+					entry["installed_count"] = len(installed)
+					entry["bangumi_name"] = item.Name
+					entry["season"] = followed.Season
+					entry["episode_offset"] = followed.EpisodeOffset
+					entry["display_name"] = followed.DisplayName
+					if len(kazumi) > 0 {
+						entry["downloaded"] = true
+						entry["kazumi_episodes"] = kazumi
+					}
+				}
+			} else {
+				entry["followed"] = false
+			}
+			list = append(list, entry)
 		}
 		out[day] = list
 	}
@@ -486,7 +615,15 @@ func ensureDB() error {
 var (
 	coverSyncMu   sync.Mutex
 	coverSyncLast time.Time
+
+	indexMu    sync.Mutex
+	indexCache = map[string]indexCacheEntry{}
 )
+
+type indexCacheEntry struct {
+	at      time.Time
+	payload any
+}
 
 // ensureCoversAsync downloads missing local covers for subscriptions and the
 // source calendar, at most once every 30 seconds.
@@ -644,6 +781,20 @@ func adminUpdate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+	}
+	async := r.URL.Query().Get("async") != "0"
+	if async {
+		go func(names []string, notIgnore bool) {
+			if err := controllers.Update(names, true, notIgnore); err != nil {
+				logger.Warning("update failed: %v", err)
+				return
+			}
+			if config.Cfg.EnablePathFormatter {
+				postprocessor.ProcessCompletedDownloads()
+			}
+		}(append([]string(nil), body.Names...), body.NotIgnore)
+		writeJSON(w, http.StatusAccepted, map[string]any{"updated": "started", "async": true})
+		return
 	}
 	if err := controllers.Update(body.Names, true, body.NotIgnore); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

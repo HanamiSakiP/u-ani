@@ -3,6 +3,7 @@ package script
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/HanamiSakiP/u-ani/internal/config"
@@ -64,19 +66,45 @@ type Result struct {
 	Episodes []model.Episode
 }
 
+var (
+	pythonOnce sync.Once
+	pythonPath string
+)
+
+// pythonCommand returns a usable Python interpreter, or an empty string when
+// the host has none. Python is entirely optional: it is only used to run
+// legacy bgmi-compatible user scripts. A broken python3 on PATH (for example
+// one with a missing shared library) must not disable the rest of the app.
 func pythonCommand() string {
-	if p := os.Getenv("UANI_PYTHON"); p != "" {
-		return p
-	}
-	if p := os.Getenv("BGMI_PYTHON"); p != "" {
-		return p
-	}
-	for _, candidate := range []string{"python3", "python"} {
-		if p, err := exec.LookPath(candidate); err == nil {
-			return p
+	pythonOnce.Do(func() {
+		candidates := []string{}
+		for _, key := range []string{"UANI_PYTHON", "BGMI_PYTHON"} {
+			if value := os.Getenv(key); value != "" {
+				candidates = append(candidates, value)
+			}
 		}
-	}
-	return ""
+		candidates = append(candidates, "python3", "python")
+		seen := map[string]bool{}
+		for _, candidate := range candidates {
+			if seen[candidate] {
+				continue
+			}
+			seen[candidate] = true
+			path, err := exec.LookPath(candidate)
+			if err != nil {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			err = exec.CommandContext(ctx, path, "-c", "import sys; sys.exit(0)").Run()
+			cancel()
+			if err == nil {
+				pythonPath = path
+				return
+			}
+			logger.Warning("Python interpreter %s is unavailable, skipping Python scripts: %v", path, err)
+		}
+	})
+	return pythonPath
 }
 
 func scriptFiles() []string {
@@ -91,7 +119,9 @@ func runPython(mode string) ([]rawItem, error) {
 	}
 	python := pythonCommand()
 	if python == "" {
-		return nil, fmt.Errorf("python interpreter not found, cannot load uani scripts")
+		// Python is an optional compatibility layer for user scripts. The rest
+		// of uani works without it, so skip scripts quietly.
+		return nil, nil
 	}
 	cfgPayload := map[string]any{
 		"max_path":     config.Cfg.MaxPath,

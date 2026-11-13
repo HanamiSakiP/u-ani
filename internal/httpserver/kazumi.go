@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/HanamiSakiP/u-ani/internal/kazumi"
+	"github.com/HanamiSakiP/u-ani/internal/logger"
 )
 
 func adminKazumiRouter(w http.ResponseWriter, r *http.Request, path string) {
@@ -28,6 +29,24 @@ func adminKazumiRouter(w http.ResponseWriter, r *http.Request, path string) {
 			return
 		}
 		adminKazumiRemove(w, r, name)
+	case r.Method == http.MethodPost && path == "browse/refresh":
+		if r.URL.Query().Get("async") == "0" {
+			if err := refreshKazumiBrowseCache(); err != nil {
+				writeError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "已更新 Kazumi 时间表/推荐缓存"})
+			return
+		}
+		go func() {
+			if err := refreshKazumiBrowseCache(); err != nil {
+				logger.Warning("refresh kazumi browse cache failed: %v", err)
+			}
+		}()
+		writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "started": true, "message": "已开始更新 Kazumi 时间表/推荐缓存，后台进行中"})
+	case r.Method == http.MethodDelete && path == "browse/cache":
+		clearKazumiBrowseCache()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "已清除 Kazumi 时间表/推荐缓存"})
 	case r.Method == http.MethodPost && path == "search":
 		adminKazumiSearch(w, r)
 	case r.Method == http.MethodPost && path == "sources":
@@ -256,8 +275,16 @@ func adminKazumiTestMirror(w http.ResponseWriter, r *http.Request) {
 	}
 	status, latency, err := kazumi.TestBangumiMirror(body.URL)
 	if err != nil {
+		message := err.Error()
+		if strings.HasPrefix(message, "镜像可用，但") {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok": true, "status": status, "latency_ms": latency.Milliseconds(),
+				"warning": message, "message": message,
+			})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": false, "status": status, "latency_ms": latency.Milliseconds(), "message": err.Error(),
+			"ok": false, "status": status, "latency_ms": latency.Milliseconds(), "message": message,
 		})
 		return
 	}

@@ -46,10 +46,18 @@ func BangumiSavePath(bangumiName string) string {
 	return filepath.Join(config.Cfg.SavePath, name)
 }
 
+// CoverCacheDir returns the dedicated cover cache directory.
+func CoverCacheDir() string {
+	if config.Cfg.CachePath != "" {
+		return filepath.Join(config.Cfg.CachePath, "covers")
+	}
+	return filepath.Join(config.Cfg.SavePath, ".cover")
+}
+
 // ConvertCoverURLToPath returns (dir, file) for a cover URL.
 func ConvertCoverURLToPath(coverURL string) (string, string) {
 	coverURL = NormalizePath(coverURL)
-	filePath := filepath.Join(config.Cfg.SavePath, ".cover", coverURL)
+	filePath := filepath.Join(CoverCacheDir(), coverURL)
 	return filepath.Dir(filePath), filePath
 }
 

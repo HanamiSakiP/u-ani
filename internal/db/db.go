@@ -413,14 +413,80 @@ func (d *DB) GetBangumiByID(id string) (*Bangumi, error) {
 }
 
 func (d *DB) GetBangumiByNameContains(name string) (*Bangumi, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, ErrNotFound
+	}
 	b, err := scanBangumi(d.QueryRow("SELECT "+bangumiColumns+" FROM bangumi WHERE instr(name, ?) > 0 LIMIT 1", name))
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, ErrNotFound
-		}
+	if err == nil {
+		return &b, nil
+	}
+	if err != sql.ErrNoRows {
 		return nil, err
 	}
-	return &b, nil
+	// Case-insensitive contains.
+	b, err = scanBangumi(d.QueryRow("SELECT "+bangumiColumns+" FROM bangumi WHERE instr(lower(name), lower(?)) > 0 LIMIT 1", name))
+	if err == nil {
+		return &b, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
+	// Fuzzy/normalized scan for similar names.
+	all, err := d.AllBangumi()
+	if err != nil {
+		return nil, err
+	}
+	target := normalizeBangumiMatchName(name)
+	if target == "" {
+		return nil, ErrNotFound
+	}
+	var best *Bangumi
+	bestScore := 0
+	for i := range all {
+		candidate := &all[i]
+		norm := normalizeBangumiMatchName(candidate.Name)
+		if norm == "" {
+			continue
+		}
+		score := 0
+		switch {
+		case norm == target:
+			score = 100
+		case strings.Contains(norm, target):
+			score = 80 + len(target)*2 - (len(norm) - len(target))
+		case strings.Contains(target, norm):
+			score = 70 + len(norm)*2 - (len(target) - len(norm))
+		}
+		if score <= 0 {
+			continue
+		}
+		if candidate.Status == BangumiStatusUpdating {
+			score += 3
+		}
+		if score > bestScore {
+			bestScore = score
+			best = candidate
+		}
+	}
+	if best != nil && bestScore >= 60 {
+		return best, nil
+	}
+	return nil, ErrNotFound
+}
+
+func normalizeBangumiMatchName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer(
+		"（", "(", "）", ")", "【", "[", "】", "]", "！", "!", "？", "?", "：", ":", "～", "~",
+		"・", "", "·", "", " ", "", "\t", "", "\n", "", "-", "", "_", "", "/", "", "／", "",
+	)
+	s = replacer.Replace(s)
+	s = strings.TrimSpace(s)
+	return s
 }
 
 func (d *DB) AllBangumi() ([]Bangumi, error) {
@@ -1181,6 +1247,13 @@ func (d *DB) SaveBangumiCache(item *BangumiCache) error {
 		 staff=excluded.staff, relations=excluded.relations, comments=excluded.comments, updated_time=excluded.updated_time`,
 		item.SubjectID, item.Overview, item.Characters, item.Staff, item.Relations, item.Comments, item.UpdatedTime,
 	)
+	return err
+}
+
+// ClearBangumiCache removes all cached subject detail sections while keeping
+// followed subscriptions, links, downloads and other user data intact.
+func (d *DB) ClearBangumiCache() error {
+	_, err := d.Exec("DELETE FROM bangumi_cache")
 	return err
 }
 

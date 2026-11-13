@@ -1,8 +1,12 @@
 package controllers
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/HanamiSakiP/u-ani/internal/bgmtv"
@@ -19,12 +23,11 @@ type BangumiCacheSummary struct {
 	Failed  int `json:"failed"`
 }
 
-// CacheFollowedBangumi downloads covers and complete Bangumi metadata
-// (overview, characters, staff, relations, comments) for every followed
-// bangumi. Only cover, character (including voice actor) and relation images
-// are downloaded locally; staff and comment images stay remote unless they
-// already exist in the local cache. When refresh is false, already cached
-// subjects are skipped.
+// CacheFollowedBangumi downloads complete Bangumi metadata (overview,
+// characters, staff, relations, comments) for every followed bangumi. Only
+// cover images are downloaded locally; all other images are reused when they
+// already exist locally and otherwise stay remote. When refresh is false,
+// already cached subjects are skipped. Subjects are fetched concurrently.
 func CacheFollowedBangumi(refresh bool) (BangumiCacheSummary, error) {
 	summary := BangumiCacheSummary{}
 	if err := ensureDB(); err != nil {
@@ -34,19 +37,31 @@ func CacheFollowedBangumi(refresh bool) (BangumiCacheSummary, error) {
 	if err != nil {
 		return summary, err
 	}
-	commentsAvailable := true
-	calendarNames := map[string]int{}
-	if days, err := bgmtv.FetchCalendar(); err == nil {
-		for _, day := range days {
-			for _, item := range day.Items {
-				for _, name := range []string{item.Name, item.NameCN} {
-					if key := normalizeForMatch(name); key != "" {
-						calendarNames[key] = item.ID
+	var calendarNames map[string]int
+	loadCalendar := func() map[string]int {
+		if calendarNames != nil {
+			return calendarNames
+		}
+		calendarNames = map[string]int{}
+		if days, err := bgmtv.FetchCalendar(); err == nil {
+			for _, day := range days {
+				for _, item := range day.Items {
+					for _, name := range []string{item.Name, item.NameCN} {
+						if key := normalizeForMatch(name); key != "" {
+							calendarNames[key] = item.ID
+						}
 					}
 				}
 			}
 		}
+		return calendarNames
 	}
+
+	type target struct {
+		name      string
+		subjectID int
+	}
+	var targets []target
 	for _, item := range followed {
 		if item.Status == db.FollowedStatusDeleted {
 			continue
@@ -56,9 +71,9 @@ func CacheFollowedBangumi(refresh bool) (BangumiCacheSummary, error) {
 			summary.Skipped++
 			continue
 		}
-		subjectID, err := db.Conn.GetSubjectIDByBangumiName(item.BangumiName)
-		if err != nil {
-			if id := calendarNames[normalizeForMatch(item.BangumiName)]; id > 0 {
+		subjectID, _ := db.Conn.GetSubjectIDByBangumiName(item.BangumiName)
+		if subjectID <= 0 {
+			if id := loadCalendar()[normalizeForMatch(item.BangumiName)]; id > 0 {
 				subjectID = id
 			}
 		}
@@ -68,65 +83,96 @@ func CacheFollowedBangumi(refresh bool) (BangumiCacheSummary, error) {
 		}
 		if !refresh {
 			if cache, err := db.Conn.GetBangumiCache(int64(subjectID)); err == nil &&
-				cache.Overview != "" && cache.Characters != "" && cache.Staff != "" && cache.Relations != "" &&
+				cache.Overview != "" && cache.Characters != "" && cache.Staff != "" && cache.Relations != "" && cacheCommentsUsable(cache.Comments) &&
 				!cacheHasRemoteImages(cache) {
 				summary.Skipped++
 				continue
 			}
 		}
-		subject, err := bgmtv.FetchSubject(subjectID)
-		if err != nil {
-			summary.Failed++
-			continue
-		}
-		_ = db.Conn.SaveBangumiLink(item.BangumiName, subjectID)
-		cache := &db.BangumiCache{SubjectID: int64(subjectID)}
-		if existing, err := db.Conn.GetBangumiCache(int64(subjectID)); err == nil && existing != nil {
-			*cache = *existing
-		}
-		if data, err := json.Marshal(cacheImages(cachedSubjectPayload(subject))); err == nil {
-			cache.Overview = string(data)
-		}
-		if items, err := bgmtv.FetchCharacters(subjectID); err == nil {
-			if data, err := json.Marshal(cacheImages(cachedCharacterPayload(items))); err == nil {
-				cache.Characters = string(data)
+		targets = append(targets, target{name: item.BangumiName, subjectID: subjectID})
+	}
+	if len(targets) == 0 {
+		return summary, nil
+	}
+
+	commentsAvailable := &atomic.Bool{}
+	commentsAvailable.Store(true)
+	var mu sync.Mutex
+	workers := 4
+	if len(targets) < workers {
+		workers = len(targets)
+	}
+	jobs := make(chan target)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for t := range jobs {
+				if cacheOneFollowedSubject(t.name, t.subjectID, commentsAvailable) {
+					mu.Lock()
+					summary.Updated++
+					mu.Unlock()
+				} else {
+					mu.Lock()
+					summary.Failed++
+					mu.Unlock()
+				}
 			}
-		} else {
-			cache.Characters = localizeExistingImages(cache.Characters)
+		}()
+	}
+	for _, t := range targets {
+		jobs <- t
+	}
+	close(jobs)
+	wg.Wait()
+	return summary, nil
+}
+
+// cacheOneFollowedSubject fetches and stores all detail sections for one
+// subject. It returns true when the cache row was saved.
+func cacheOneFollowedSubject(name string, subjectID int, commentsAvailable *atomic.Bool) bool {
+	subject, err := bgmtv.FetchSubject(subjectID)
+	if err != nil {
+		return false
+	}
+	_ = db.Conn.SaveBangumiLink(name, subjectID)
+	cache := &db.BangumiCache{SubjectID: int64(subjectID)}
+	if existing, err := db.Conn.GetBangumiCache(int64(subjectID)); err == nil && existing != nil {
+		*cache = *existing
+	}
+	// Only the subject cover is downloaded; every other image is reused
+	// locally when already present, otherwise left as a remote URL.
+	if data, err := json.Marshal(cacheImages(cachedSubjectPayload(subject))); err == nil {
+		cache.Overview = string(data)
+	}
+	if items, err := bgmtv.FetchCharacters(subjectID); err == nil {
+		if data, err := json.Marshal(localizeCacheImages(cachedCharacterPayload(items))); err == nil {
+			cache.Characters = string(data)
 		}
-		if items, err := bgmtv.FetchStaff(subjectID); err == nil {
-			if data, err := json.Marshal(localizeCacheImages(cachedStaffPayload(items))); err == nil {
-				cache.Staff = string(data)
-			}
-		} else {
-			cache.Staff = localizeExistingImages(cache.Staff)
+	}
+	if items, err := bgmtv.FetchStaff(subjectID); err == nil {
+		if data, err := json.Marshal(localizeCacheImages(cachedStaffPayload(items))); err == nil {
+			cache.Staff = string(data)
 		}
-		if items, err := bgmtv.FetchRelations(subjectID); err == nil {
-			if data, err := json.Marshal(cacheImages(cachedRelationPayload(items))); err == nil {
-				cache.Relations = string(data)
-			}
-		} else {
-			cache.Relations = localizeExistingImages(cache.Relations)
+	}
+	if items, err := bgmtv.FetchRelations(subjectID); err == nil {
+		if data, err := json.Marshal(localizeCacheImages(cachedRelationPayload(items))); err == nil {
+			cache.Relations = string(data)
 		}
-		if commentsAvailable {
-			if page, err := bgmtv.FetchComments(subjectID, 0, 20); err == nil {
+	}
+	if commentsAvailable.Load() {
+		if page, err := bgmtv.FetchComments(subjectID, 0, 20); err == nil {
+			if len(page.List) > 0 || page.Total > 0 {
 				if data, err := json.Marshal(localizeCacheImages(cachedCommentPayload(page))); err == nil {
 					cache.Comments = string(data)
 				}
-			} else {
-				commentsAvailable = false
-				cache.Comments = localizeExistingImages(cache.Comments)
 			}
 		} else {
-			cache.Comments = localizeExistingImages(cache.Comments)
+			commentsAvailable.Store(false)
 		}
-		if err := db.Conn.SaveBangumiCache(cache); err != nil {
-			summary.Failed++
-			continue
-		}
-		summary.Updated++
 	}
-	return summary, nil
+	return db.Conn.SaveBangumiCache(cache) == nil
 }
 
 func cachedSubjectPayload(subject *bgmtv.Subject) map[string]any {
@@ -199,28 +245,72 @@ func cachedRelationPayload(items []bgmtv.Relation) []map[string]any {
 	return out
 }
 
+func cacheCommentsUsable(raw string) bool {
+	if strings.TrimSpace(raw) == "" {
+		return false
+	}
+	var payload struct {
+		Items    []any `json:"items"`
+		List     []any `json:"list"`
+		Data     []any `json:"data"`
+		Comments []any `json:"comments"`
+		Total    *int  `json:"total"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return false
+	}
+	if len(payload.Items) > 0 || len(payload.List) > 0 || len(payload.Data) > 0 || len(payload.Comments) > 0 {
+		return true
+	}
+	return payload.Total != nil && *payload.Total > 0
+}
+
 func cachedCommentPayload(page *bgmtv.CommentPage) map[string]any {
 	out := make([]map[string]any, 0, len(page.List))
 	for _, item := range page.List {
-		cover := ""
-		for _, candidate := range []string{item.User.Avatar.Large, item.User.Avatar.Common, item.User.Avatar.Medium, item.User.Avatar.Small} {
-			if candidate != "" {
-				cover = candidate
-				break
-			}
-		}
 		out = append(out, map[string]any{
-			"user": map[string]any{"id": item.User.ID, "username": item.User.Username, "nickname": item.User.Nickname, "cover": cover},
-			"rate": item.Rate, "comment": item.Comment, "updated_at": item.UpdatedAt,
+			"user":       map[string]any{"id": item.User.ID, "username": item.User.Username, "nickname": item.User.Nickname, "cover": commentAvatar(item.User.Avatar)},
+			"rate":       item.Rate,
+			"comment":    item.Comment,
+			"updated_at": item.UpdatedAt,
 		})
 	}
 	return map[string]any{"items": out, "total": page.Total}
+}
+
+func commentAvatar(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err == nil {
+		return value
+	}
+	var images bgmtv.Images
+	if err := json.Unmarshal(raw, &images); err == nil {
+		for _, candidate := range []string{images.Large, images.Common, images.Medium, images.Small} {
+			if candidate != "" {
+				return candidate
+			}
+		}
+	}
+	return ""
 }
 
 // CacheSummaryText formats a short user-facing summary.
 func CacheSummaryText(summary BangumiCacheSummary) string {
 	return fmt.Sprintf("追番信息更新完成：成功 %d，跳过 %d，失败 %d（共 %d，%s）",
 		summary.Updated, summary.Skipped, summary.Failed, summary.Total, time.Now().Format("15:04:05"))
+}
+
+// ClearBangumiDetailCache removes cached Bangumi metadata/comments while
+// preserving subscriptions and all followed-anime information.
+func ClearBangumiDetailCache() error {
+	if err := ensureDB(); err != nil {
+		return err
+	}
+	return db.Conn.ClearBangumiCache()
 }
 
 func localizeExistingImages(raw string) string {
@@ -238,11 +328,11 @@ func localizeExistingImages(raw string) string {
 	return string(data)
 }
 
-// cacheHasRemoteImages reports whether cache sections that are downloaded
-// locally still contain remote image URLs. Staff and comment images are not
-// downloaded, so they do not make the cache stale.
+// cacheHasRemoteImages reports whether cached cover metadata still contains
+// remote Bangumi image URLs that should be cached locally by "更新缓存".
+// Kazumi only caches cover images; other section images stay remote.
 func cacheHasRemoteImages(cache *db.BangumiCache) bool {
-	for _, raw := range []string{cache.Overview, cache.Characters, cache.Relations} {
+	for _, raw := range []string{cache.Overview} {
 		if raw == "" {
 			continue
 		}
@@ -276,10 +366,15 @@ func cacheImages(payload any) any {
 	collectCacheImages(payload, urls)
 	if len(urls) > 0 {
 		values := make([]string, 0, len(urls))
-		for url := range urls {
-			values = append(values, url)
+		for raw := range urls {
+			if _, file := utils.ConvertCoverURLToPath(raw); utils.IsImage(file) {
+				continue
+			}
+			values = append(values, raw)
 		}
-		utils.DownloadCover(values)
+		if len(values) > 0 {
+			utils.DownloadCover(values)
+		}
 	}
 	return rewriteCacheImages(payload, urls)
 }
@@ -343,7 +438,7 @@ func rewriteCacheImages(value any, urls map[string]bool) any {
 		if urls[v] {
 			_, file := utils.ConvertCoverURLToPath(v)
 			if utils.IsImage(file) {
-				return "/bangumi/.cover/" + utils.NormalizePath(v)
+				return "/covers/" + utils.NormalizePath(v)
 			}
 		}
 		return v

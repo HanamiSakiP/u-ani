@@ -19,6 +19,11 @@
   const imageCaption = document.getElementById("image-caption");
   const sidebar = document.getElementById("sidebar");
 
+  function setSidebarOpen(open) {
+    sidebar.classList.toggle("open", !!open);
+    document.body.classList.toggle("sidebar-open", !!open);
+  }
+
   const state = {
     token: localStorage.getItem("uani_token") || "",
     route: "subscriptions",
@@ -31,7 +36,7 @@
     settingsTab: "bangumi",
     calendar: {},
     timeline: { days: [], day: "" },
-    recommend: { tag: "", query: "", subjects: [] },
+    recommend: { tag: "", query: "", subjects: [], cache: {}, categoriesLoaded: false },
     files: { tab: "tasks", tasks: [], files: [], rules: [], catalog: [], catalogLoaded: false, settings: null, loaded: false },
     detail: { subjectId: 0, subject: null, local: null, name: "", tab: "overview", sections: {}, collectionType: 0, collectionLoaded: false, navItems: [], navIndex: -1 },
     watch: { name: "", loading: false, sources: [], selected: null, roads: [], error: "" },
@@ -56,13 +61,13 @@
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-  function toast(message, type = "info") {
+  function toast(message, type = "info", duration = 3600) {
     const node = document.createElement("div");
     node.className = `toast ${type}`;
     node.textContent = message;
     toastStack.appendChild(node);
-    setTimeout(() => { node.style.opacity = "0"; node.style.transform = "translateY(8px)"; node.style.transition = ".2s"; }, 3400);
-    setTimeout(() => node.remove(), 3700);
+    setTimeout(() => { node.style.opacity = "0"; node.style.transform = "translateY(8px)"; node.style.transition = ".2s"; }, Math.max(1200, duration - 300));
+    setTimeout(() => node.remove(), duration);
   }
 
   function formatSize(bytes) {
@@ -75,7 +80,17 @@
 
   function formatTime(ts) {
     if (!ts) return "-";
-    const d = new Date(Number(ts) * 1000);
+    let value = Number(ts);
+    if (!Number.isFinite(value) || value <= 0) return "-";
+    if (value > 1e12) {
+      // already milliseconds
+    } else if (value > 1e10) {
+      value *= 1;
+    } else {
+      value *= 1000;
+    }
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return "-";
     return d.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   }
 
@@ -86,41 +101,89 @@
 
   function coverURL(value) {
     if (!value) return "";
-    const raw = String(value);
-    if (/^https?:\/\/(lain\.bgm\.tv|api\.bgm\.tv)\//i.test(raw)) {
-      return `/api/image?url=${encodeURIComponent(raw)}`;
-    }
+    let raw = String(value).trim();
+    if (!raw) return "";
+    if (raw.startsWith("//")) raw = "https:" + raw;
     if (raw.startsWith("http")) return raw;
     return raw.startsWith("/") ? raw : `/${raw}`;
+  }
+
+  function proxyImageURL(value) {
+    if (!value) return "";
+    let raw = String(value).trim();
+    if (!raw) return "";
+    if (raw.startsWith("//")) raw = "https:" + raw;
+    if (/^https?:\/\/lain\.bgm\.tv\//i.test(raw) || /^https?:\/\/api\.bgm\.tv\/v0\/(subjects|characters|persons)\/\d+\/image(?:\?.*)?$/i.test(raw)) {
+      return `/api/image?url=${encodeURIComponent(raw)}`;
+    }
+    return "";
+  }
+
+  function coverImgTag(url, alt = "", extraClass = "cover", extraAttrs = "", eager = false) {
+    if (!url) return "";
+    const raw = String(url).trim();
+    const proxy = proxyImageURL(raw);
+    const loading = eager ? 'loading="eager" fetchpriority="high"' : 'loading="lazy"';
+    // Prefer the built-in image proxy so Bangumi covers respect the configured
+    // acceleration mode instead of hanging on a slow direct connection.
+    if (proxy && proxy !== raw) {
+      return `<img class="${esc(extraClass)}" ${loading} decoding="async" referrerpolicy="no-referrer" src="${esc(proxy)}" alt="${esc(alt)}" ${extraAttrs} data-fallback="${esc(raw)}" onerror="if(!this.dataset.tried&&this.dataset.fallback){this.dataset.tried=1;this.src=this.dataset.fallback}else{this.style.display='none'}" />`;
+    }
+    return `<img class="${esc(extraClass)}" ${loading} decoding="async" referrerpolicy="no-referrer" src="${esc(raw)}" alt="${esc(alt)}" ${extraAttrs} onerror="this.style.display='none'" />`;
   }
 
   const preloadedImages = new Set();
 
   function preloadImages(urls) {
-    for (const value of urls || []) {
-      const url = String(value || "").trim();
-      if (!url || preloadedImages.has(url)) continue;
+    const list = (urls || []).map((value) => String(value || "").trim()).filter(Boolean).slice(0, 24);
+    for (const url of list) {
+      if (preloadedImages.has(url)) continue;
       preloadedImages.add(url);
       const image = new Image();
       image.decoding = "async";
+      image.loading = "lazy";
       image.src = url;
       state.preloaded.push(image);
-      if (state.preloaded.length > 240) state.preloaded.shift();
+      if (state.preloaded.length > 80) state.preloaded.shift();
     }
   }
 
   function preloadCovers(items) {
-    preloadImages((items || []).map((item) => coverURL(item && item.cover)));
+    if (document.hidden) return;
+    const urls = (items || [])
+      .map((item) => {
+        const cover = coverURL(item && item.cover);
+        if (!cover) return "";
+        if (cover.startsWith("/") && !cover.startsWith("/api/image")) return cover;
+        return proxyImageURL(cover);
+      })
+      .filter(Boolean)
+      .slice(0, 16);
+    if (!urls.length) return;
+    const run = () => preloadImages(urls);
+    if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 800 });
+    else setTimeout(run, 0);
   }
 
-  function showNotice(title, text, type = "info") {
+  function showNotice(title, text, type = "info", action = null) {
     const icon = document.getElementById("notice-icon");
     const titleNode = document.getElementById("notice-title");
     const textNode = document.getElementById("notice-text");
+    const actions = noticeDialog ? noticeDialog.querySelector(".dialog-actions") : null;
     if (icon) { icon.textContent = type === "good" ? "✓" : type === "bad" ? "!" : type === "warn" ? "!" : "i"; icon.className = `notice-icon ${type}`; }
     if (titleNode) titleNode.textContent = title;
     if (textNode) textNode.textContent = text || "";
+    if (actions) {
+      actions.innerHTML = action
+        ? `<button class="btn ghost" type="button" id="notice-ok">关闭</button><button class="btn primary" type="button" data-action="${esc(action.action)}">${esc(action.label)}</button>`
+        : `<button class="btn primary" id="notice-ok">知道了</button>`;
+      const ok = document.getElementById("notice-ok");
+      if (ok) ok.onclick = () => closeDialog(noticeDialog);
+    }
+    toast(`${title}${text ? "：" + text : ""}`, type === "info" ? "warn" : type, 5200);
     openDialog(noticeDialog);
+    const ok = document.getElementById("notice-ok");
+    if (ok) setTimeout(() => ok.focus(), 0);
   }
 
   let loadingTimer = null;
@@ -158,9 +221,15 @@
   }
 
   function openDialog(dialog) {
+    if (!dialog) return;
     if (dialog === modal && !modalBody.querySelector("#player-video")) stopVideoPlayback();
-    if (typeof dialog.showModal === "function") dialog.showModal();
-    else dialog.setAttribute("open", "");
+    if (dialog.open) return;
+    try {
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+    } catch (_) {
+      try { dialog.setAttribute("open", ""); } catch (e) {}
+    }
   }
   function closeDialog(dialog) {
     if (dialog === modal) {
@@ -171,7 +240,7 @@
     else dialog.removeAttribute("open");
   }
 
-  async function api(path, { method = "GET", body, admin = false } = {}) {
+  async function api(path, { method = "GET", body, admin = false, signal, timeout = 0 } = {}) {
     const headers = {};
     if (body !== undefined) headers["Content-Type"] = "application/json";
     if (admin) {
@@ -181,11 +250,18 @@
       }
       headers.Authorization = `Bearer ${state.token}`;
     }
+    const controller = !signal && timeout > 0 ? new AbortController() : null;
+    const fetchSignal = signal || (controller ? controller.signal : undefined);
+    let timer = null;
+    if (controller) timer = setTimeout(() => controller.abort(), timeout);
     let response;
     try {
-      response = await fetch(path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+      response = await fetch(path, { method, headers, signal: fetchSignal, body: body !== undefined ? JSON.stringify(body) : undefined });
     } catch (err) {
+      if (err && err.name === "AbortError") throw new Error(timeout > 0 ? "请求超时，请检查网络或镜像设置" : "请求已取消");
       throw new Error(`网络错误：${err.message}`);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
     if (response.status === 403 && admin) {
       openTokenDialog();
@@ -215,6 +291,17 @@
     return `<div class="empty"><div class="big">${icon}</div><div>${esc(text)}</div></div>`;
   }
 
+  // Hovering previous/next gives the background prefetch a head start.
+  document.addEventListener("mouseover", (event) => {
+    const target = event.target.closest("[data-action='detail-nav']");
+    if (!target || target.disabled) return;
+    const items = state.detail.navItems || [];
+    const index = Number(state.detail.navIndex);
+    const delta = Number(target.dataset.delta || 0);
+    const item = items[index + delta];
+    if (item && item.subjectId) prefetchDetailSubject(item.subjectId);
+  });
+
   // Event delegation for dynamic [data-action] (works in the view and dialogs).
   document.addEventListener("click", async (event) => {
     const target = event.target.closest("[data-action]");
@@ -233,6 +320,12 @@
         closeDialog(modal);
         await renderRoute(true);
         break;
+      case "calendar-catchup":
+        await calendarCatchup();
+        break;
+      case "calendar-catchup-day":
+        await calendarCatchup(target.dataset.names || "");
+        break;
       case "add-subscription":
         openAddDialog();
         break;
@@ -241,6 +334,9 @@
         break;
       case "cache-followed":
         await cacheFollowed();
+        break;
+      case "clear-detail-cache":
+        await clearDetailCache();
         break;
       case "export-follows":
         await exportFollows();
@@ -266,9 +362,38 @@
       case "watch-online":
         await startWatchingOnline(target.dataset.name);
         break;
-      case "open-kazumi-subject":
-        await openSubjectDetail({ subjectId: Number(target.dataset.id) });
+      case "open-kazumi-subject": {
+        const id = Number(target.dataset.id);
+        const index = Number(target.dataset.cardIndex);
+        let navItems = [];
+        let navIndex = -1;
+        if (state.route === "recommend" && Array.isArray(state.recommend.subjects)) {
+          navItems = state.recommend.subjects.map((item) => ({
+            subjectId: Number(item.id),
+            name: item.name_cn || item.name || "",
+            local: { name: item.name_cn || item.name || "", name_cn: item.name_cn, cover: item.cover || "", score: item.score, update_day: "" },
+          }));
+          navIndex = Number.isInteger(index) && index >= 0 ? index : navItems.findIndex((item) => item.subjectId === id);
+        } else if (state.route === "timeline" && Array.isArray(state.timeline.days)) {
+          const day = state.timeline.days.find((item) => item.weekday === state.timeline.day) || state.timeline.days[0];
+          const list = (day && day.items) || [];
+          navItems = list.map((item) => ({
+            subjectId: Number(item.id),
+            name: item.name_cn || item.name || "",
+            local: { name: item.name_cn || item.name || "", name_cn: item.name_cn, cover: item.cover || "", score: item.score, update_day: "" },
+          }));
+          navIndex = Number.isInteger(index) && index >= 0 ? index : navItems.findIndex((item) => item.subjectId === id);
+        }
+        const card = navIndex >= 0 ? navItems[navIndex] : null;
+        await openSubjectDetail({
+          subjectId: id,
+          name: card ? card.name : "",
+          local: card ? card.local : null,
+          navItems,
+          navIndex,
+        });
         break;
+      }
       case "open-calendar-item":
         await openCalendarCard(target);
         break;
@@ -280,7 +405,7 @@
         break;
       case "detail-retry":
         state.detail.sections[target.dataset.tab] = null;
-        await switchDetailTab(target.dataset.tab);
+        await switchDetailTab(target.dataset.tab, true);
         break;
       case "set-collection":
         await setCollection(Number(target.dataset.type));
@@ -300,6 +425,20 @@
       case "watch-episode":
         await downloadWatchEpisode(Number(target.dataset.road), Number(target.dataset.index));
         break;
+      case "watch-download-all":
+        await downloadWatchEpisodesBatch(Number(target.dataset.road), true);
+        break;
+      case "watch-download-selected":
+        await downloadWatchEpisodesBatch(Number(target.dataset.road), false);
+        break;
+      case "watch-select-road": {
+        const road = Number(target.dataset.road);
+        const checked = !!target.checked;
+        $$(".watch-episode-check", modalBody).forEach((box) => {
+          if (Number(box.dataset.road) === road) box.checked = checked;
+        });
+        break;
+      }
       case "watch-play":
         await playWatchEpisode(Number(target.dataset.road), Number(target.dataset.index));
         break;
@@ -315,6 +454,11 @@
       case "watch-back":
         state.watch.selected = null;
         state.watch.roads = [];
+        state.watch.showAllRoads = false;
+        renderWatch();
+        break;
+      case "watch-show-all-roads":
+        state.watch.showAllRoads = true;
         renderWatch();
         break;
       case "add-kazumi-subject":
@@ -326,9 +470,8 @@
         break;
       case "recommend-tag":
         state.recommend.tag = target.dataset.tag || "";
-        showLoading("正在加载分类…");
-        try { await loadRecommendations(state.recommend.query || "", true); }
-        finally { hideLoading(); }
+        $$("#view [data-action='recommend-tag']").forEach((chip) => chip.classList.toggle("active", (chip.dataset.tag || "") === state.recommend.tag));
+        await loadRecommendations(state.recommend.query || "", false);
         break;
       case "delete-show":
         await deleteShow(target.dataset.name);
@@ -359,9 +502,14 @@
         if (state.files.tab === "catalog" && !state.files.catalogLoaded) await loadRuleCatalog();
         renderFilesContent();
         break;
+      case "go-files-tasks":
+        closeDialog(noticeDialog);
+        navigate("#/files");
+        state.files.tab = "tasks";
+        break;
       case "subscription-filter":
         state.subscriptionFilter = target.dataset.type || "all";
-        renderSubscriptionList();
+        updateSubscriptionFilterUI();
         break;
       case "cancel-task":
         await cancelTask(target.dataset.id);
@@ -371,6 +519,23 @@
         break;
       case "delete-task":
         await deleteTask(target.dataset.id);
+        break;
+      case "retry-failed-tasks":
+        await retryFailedTasks();
+        break;
+      case "delete-failed-tasks":
+        await deleteFailedTasks();
+        break;
+      case "go-files-tasks":
+        closeDialog(noticeDialog);
+        state.files.tab = "tasks";
+        navigate("#/files");
+        break;
+      case "kazumi-browse-refresh":
+        await refreshKazumiBrowseCache();
+        break;
+      case "kazumi-browse-clear":
+        await clearKazumiBrowseCacheAction();
         break;
       case "play-file":
         openPlayer(`/kazumi-files/${encodeURI(target.dataset.path)}`, target.dataset.name, true);
@@ -440,7 +605,11 @@
     setActions("");
     $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.route === state.route));
     sidebar.classList.remove("open");
+    document.body.classList.remove("sidebar-open");
     if (state.timer) { clearInterval(state.timer); state.timer = null; }
+    view.classList.remove("route-switching");
+    // Yield so navigation highlight updates paint before rendering.
+    if (!force) await new Promise((resolve) => requestAnimationFrame(() => resolve()));
     try {
       await route.render(force);
     } catch (err) {
@@ -469,20 +638,32 @@
       <button class="btn" data-action="cache-followed">更新追番信息</button>
       <button class="btn" data-action="export-follows">导出追番</button>
       <button class="btn" data-action="import-follows">导入追番</button>
-      <button class="btn" data-action="update-all">检查更新</button>
+      <button class="btn" data-action="update-all">追更下载</button>
       <button class="btn primary" data-action="add-subscription">添加订阅</button>
     `);
-    if (state.subscriptions.length && !force) {
+    const hasCache = state.subscriptions.length > 0;
+    if (hasCache) renderSubscriptionList();
+    if (!hasCache || force) {
+      if (!hasCache) view.innerHTML = `<div class="grid stats">${Array.from({ length: 4 }, () => '<div class="skeleton" style="height:90px"></div>').join("")}</div>${loadingCards(8)}`;
+      const payload = await api(force ? "/api/index/index?refresh=1" : "/api/index/index");
+      if (state.route !== "subscriptions") return;
+      state.version = payload.version || state.version;
+      document.getElementById("app-version").textContent = `uani ${state.version}`;
+      state.subscriptions = Array.isArray(payload.data) ? payload.data : [];
+      preloadCovers(state.subscriptions);
       renderSubscriptionList();
-    } else {
-      view.innerHTML = `<div class="grid stats">${Array.from({ length: 4 }, () => '<div class="skeleton" style="height:90px"></div>').join("")}</div>${loadingCards(8)}`;
+      return;
     }
-    const payload = await api("/api/index/index");
-    state.version = payload.version || state.version;
-    document.getElementById("app-version").textContent = `uani ${state.version}`;
-    state.subscriptions = Array.isArray(payload.data) ? payload.data : [];
-    preloadCovers(state.subscriptions);
-    renderSubscriptionList();
+    // Refresh in background so switching to this page is instant.
+    api("/api/index/index").then((payload) => {
+      if (state.route !== "subscriptions") return;
+      state.version = payload.version || state.version;
+      document.getElementById("app-version").textContent = `uani ${state.version}`;
+      const next = Array.isArray(payload.data) ? payload.data : [];
+      const same = JSON.stringify(next.map((x) => [x.id, x.bangumi_name, x.episode, x.status, x.downloaded, x.collection_type, x.cover])) === JSON.stringify(state.subscriptions.map((x) => [x.id, x.bangumi_name, x.episode, x.status, x.downloaded, x.collection_type, x.cover]));
+      state.subscriptions = next;
+      if (!same) renderSubscriptionList();
+    }).catch(() => {});
   }
 
   function renderSubscriptionList() {
@@ -511,20 +692,36 @@
       <div class="panel">
         <div class="toolbar" style="margin-bottom:14px"><div class="searchbox grow"><input id="subscription-search" type="search" placeholder="搜索追番名称…" value="${esc(state.subscriptionQuery || "")}" /></div><button class="btn" id="subscription-search-btn">搜索</button></div>
         <div class="chips" style="margin-bottom:16px">${chips}</div>
-        <div id="subscription-cards">${filteredCardsHtml()}</div>
+        <div id="subscription-cards"></div>
       </div>
     `;
+    const cardsBox = document.getElementById("subscription-cards");
+    const filtered = filteredSubscriptions();
+    if (cardsBox) {
+      if (!filtered.length) cardsBox.innerHTML = emptyState("▦", filter === "all" ? "没有匹配的追番" : "当前分类下没有番剧");
+      else renderCardsChunked(cardsBox, filtered, showCard);
+    }
     const input = document.getElementById("subscription-search");
     if (input) {
+      let searchTimer = null;
       const apply = () => {
-        state.subscriptionQuery = input.value;
-        const box = document.getElementById("subscription-cards");
-        if (box) box.innerHTML = filteredCardsHtml();
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => {
+          state.subscriptionQuery = input.value;
+          const box = document.getElementById("subscription-cards");
+          if (!box) return;
+          const list = filteredSubscriptions();
+          if (!list.length) {
+            box.innerHTML = emptyState("▦", state.subscriptionFilter === "all" ? "没有匹配的追番" : "当前分类下没有番剧");
+            return;
+          }
+          renderCardsChunked(box, list, showCard);
+        }, 120);
       };
       input.addEventListener("input", apply);
-      input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); apply(); } });
+      input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); clearTimeout(searchTimer); state.subscriptionQuery = input.value; const box = document.getElementById("subscription-cards"); if (box) { const list = filteredSubscriptions(); if (!list.length) box.innerHTML = emptyState("▦", "没有匹配的追番"); else renderCardsChunked(box, list, showCard); } } });
       const button = document.getElementById("subscription-search-btn");
-      if (button) button.addEventListener("click", apply);
+      if (button) button.addEventListener("click", () => { clearTimeout(searchTimer); state.subscriptionQuery = input.value; const box = document.getElementById("subscription-cards"); if (box) { const list = filteredSubscriptions(); if (!list.length) box.innerHTML = emptyState("▦", "没有匹配的追番"); else renderCardsChunked(box, list, showCard); } });
     }
   }
 
@@ -544,6 +741,64 @@
     const filtered = filteredSubscriptions();
     if (!filtered.length) return emptyState("▦", state.subscriptionFilter === "all" ? "没有匹配的追番" : "当前分类下没有番剧");
     return `<div class="grid card-grid">${filtered.map((item, index) => showCard(item, index)).join("")}</div>`;
+  }
+
+  function renderCardsChunked(container, items, renderItem, isAlive = () => state.route === "subscriptions") {
+    const total = items.length;
+    if (!total) {
+      container.innerHTML = emptyState("▦", "没有匹配的追番");
+      return;
+    }
+    const chunk = 24;
+    container.innerHTML = `<div class="grid card-grid" id="cards-grid"></div>`;
+    const grid = container.querySelector("#cards-grid");
+    let index = 0;
+    const step = () => {
+      if (!isAlive() || !grid || !grid.isConnected) return;
+      const end = Math.min(index + chunk, total);
+      let html = "";
+      for (; index < end; index++) html += renderItem(items[index], index);
+      grid.insertAdjacentHTML("beforeend", html);
+      if (index < total) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+
+  function renderGridChunked(grid, items, renderItem, isAlive = () => true) {
+    if (!grid) return;
+    const total = items.length;
+    let index = 0;
+    const chunk = 18;
+    const token = String((Number(grid.dataset.renderToken) || 0) + 1);
+    grid.dataset.renderToken = token;
+    const step = () => {
+      if (grid.dataset.renderToken !== token || !isAlive() || !grid.isConnected) return;
+      const end = Math.min(index + chunk, total);
+      let html = "";
+      for (; index < end; index++) html += renderItem(items[index], index);
+      grid.insertAdjacentHTML("beforeend", html);
+      if (index < total) requestAnimationFrame(step);
+    };
+    grid.innerHTML = "";
+    requestAnimationFrame(step);
+  }
+
+  function updateSubscriptionFilterUI() {
+    const cards = document.getElementById("subscription-cards");
+    if (!cards) {
+      renderSubscriptionList();
+      return;
+    }
+    const filter = state.subscriptionFilter || "all";
+    $$("#view [data-action='subscription-filter']").forEach((chip) => {
+      chip.classList.toggle("active", (chip.dataset.type || "all") === filter);
+    });
+    const filtered = filteredSubscriptions();
+    if (!filtered.length) {
+      cards.innerHTML = emptyState("▦", state.subscriptionFilter === "all" ? "没有匹配的追番" : "当前分类下没有番剧");
+      return;
+    }
+    renderCardsChunked(cards, filtered, showCard);
   }
 
   function episodeSummary(item, downloadedOnly = false) {
@@ -569,34 +824,53 @@
 
   function showCard(item, index = -1) {
     const update = Number(item.status) === 2 ? '<span class="badge good">有更新</span>' : "";
-    const cached = item.downloaded ? '<span class="badge good">已缓存</span>' : "";
+    const kazumiCount = Array.isArray(item.kazumi_episodes) ? item.kazumi_episodes.length : 0;
+    const cached = item.downloaded ? `<span class="badge good">已下载${kazumiCount ? ` ${kazumiCount} 集` : ""}</span>` : "";
     const follow = { 1: "想看", 2: "看过", 3: "在看", 4: "搁置", 5: "抛弃" }[Number(item.collection_type || 3)] || "在看";
     const cover = coverURL(item.cover);
     return `
       <article class="show-card" data-action="open-show" data-id="${esc(item.id || item.bangumi_name)}" data-card-index="${index}">
         <div class="cover-wrap">
           <div class="cover-fallback">${esc((item.bangumi_name || "?").slice(0, 1))}</div>
-          ${cover ? `<img class="cover" loading="eager" src="${esc(cover)}" alt="${esc(item.bangumi_name)}" onerror="this.remove()" />` : ""}
+          ${coverImgTag(cover, item.bangumi_name || "", "cover", "", index >= 0 && index < 8)}
         </div>
         <div class="show-meta">
           <div class="show-name">${esc(item.bangumi_name)}</div>
-          <div class="show-sub"><span>${esc(item.display_name || "")}</span><span>EP ${Number(item.episode || 0)}</span></div>
+          <div class="show-sub"><span>${esc(item.display_name || "")}</span><span>记录到 EP ${Number(item.episode || 0)}</span></div>
           <div class="show-sub"><span class="badge muted">${follow}</span>${update}${cached}<span>${esc(dayName(item.update_day))}</span></div>
-          <div class="show-sub"><span>已装 ${esc(episodeSummary(item, true))}</span></div>
+          <div class="show-sub"><span>${item.downloaded ? "已下载/已缓存" : "已安装"} ${esc(episodeSummary(item, true))}</span></div>
           ${item.downloaded ? `<div class="show-sub"><button class="btn small primary" data-action="open-local-watch" data-id="${esc(item.id || "")}" data-name="${esc(item.bangumi_name || "")}">开始观看</button></div>` : ""}
         </div>
       </article>`;
   }
 
   async function openShow(id, target) {
-    const payload = await api(`/api/player/${encodeURIComponent(id)}`);
-    const item = payload.data || {};
     const list = filteredSubscriptions();
     let navIndex = target ? Number(target.dataset.cardIndex) : -1;
     if (!Number.isInteger(navIndex) || navIndex < 0 || navIndex >= list.length) navIndex = -1;
+    const local = navIndex >= 0 ? list[navIndex] : (state.subscriptions.find((entry) => String(entry.id || entry.bangumi_name) === String(id)) || null);
     const navItems = list.map((entry) => ({ name: entry.bangumi_name, local: entry }));
-    if (navIndex >= 0) navItems[navIndex] = { name: item.bangumi_name || list[navIndex].bangumi_name, local: item };
-    await openSubjectDetail({ name: item.bangumi_name, local: item, navItems, navIndex });
+    const name = (local && local.bangumi_name) || "";
+    if (local) openSubjectDetail({ name, local, navItems, navIndex });
+    const hasLocalDetail = local && (local.player && Object.keys(local.player).length || local.downloaded || Array.isArray(local.kazumi_episodes));
+    if (hasLocalDetail) return;
+    try {
+      const payload = await api(`/api/player/${encodeURIComponent(id)}`, { timeout: 10000 });
+      const item = payload.data || local || {};
+      if (!local) {
+        await openSubjectDetail({ name: item.bangumi_name || name, local: item, navItems, navIndex });
+        return;
+      }
+      if (navIndex >= 0) navItems[navIndex] = { name: item.bangumi_name || navItems[navIndex].name, local: item };
+      if (state.detail && state.detail.name === (item.bangumi_name || name)) {
+        const before = JSON.stringify({ player: state.detail.local && state.detail.local.player, ep: state.detail.local && state.detail.local.episode, d: state.detail.local && state.detail.local.downloaded, ke: state.detail.local && state.detail.local.kazumi_episodes });
+        state.detail.local = { ...(state.detail.local || {}), ...item };
+        const after = JSON.stringify({ player: state.detail.local.player, ep: state.detail.local.episode, d: state.detail.local.downloaded, ke: state.detail.local.kazumi_episodes });
+        if (before !== after) renderDetail();
+      }
+    } catch (err) {
+      if (!local) toast(err.message || String(err), "bad");
+    }
   }
 
   function stopVideoPlayback() {
@@ -709,7 +983,10 @@
     modalBody.classList.add("player-mode");
     state.playerContext = context && Array.isArray(context.episodes) ? context : null;
     const isAbsolute = absolute || /^https?:\/\//i.test(path) || /^\/(?:kazumi-files|bangumi)\//.test(path);
-    const src = isAbsolute ? path : `/bangumi${path.startsWith("/") ? "" : "/"}${path}`;
+    let src = isAbsolute ? path : `/bangumi${path.startsWith("/") ? "" : "/"}${path}`;
+    if (!/^https?:\/\//i.test(src)) {
+      src = src.split("/").map((segment, index) => index === 0 ? segment : encodeURIComponent(segment)).join("/");
+    }
     const isHLS = /\.m3u8(\?|$)/i.test(src);
     modalBody.innerHTML = `
       <div class="panel-head player-head"><h2>${esc(title || "播放")}</h2>${state.playerContext ? `<span class="badge good">已缓存 ${state.playerContext.episodes.length} 集</span>` : ""}<div class="spacer"></div><a class="btn small" href="${esc(src)}" target="_blank" rel="noopener">新窗口打开</a></div>
@@ -721,6 +998,17 @@
     const video = document.getElementById("player-video");
     if (!video) return;
     const attach = () => {
+      const onError = () => {
+        try {
+          video.removeEventListener("error", onError);
+          const w = window.open(src, "_blank", "noopener,noreferrer");
+          if (w) w.opener = null;
+          else showNotice("播放失败", "无法直接播放该视频，已尝试在新窗口打开。若仍失败，可复制链接在播放器中打开。", "warn");
+        } catch (_) {
+          showNotice("播放失败", "无法直接播放该视频，请使用“新窗口打开”按钮。", "warn");
+        }
+      };
+      video.addEventListener("error", onError);
       if (isHLS && window.Hls && window.Hls.isSupported()) {
         const hls = new window.Hls();
         hls.loadSource(src);
@@ -798,11 +1086,27 @@
     }
   }
 
+  async function clearDetailCache() {
+    if (!confirm("清除番剧详情、角色、吐槽等缓存？不会删除追番、订阅、下载记录和已下载文件。")) return;
+    showLoading("正在清理缓存…");
+    try {
+      const payload = await api("/api/admin/bangumi/cache/clear", { method: "POST", admin: true });
+      toast(payload.message || "缓存已清除", "good");
+    } finally {
+      hideLoading();
+    }
+  }
+
   async function updateAll() {
-    toast("正在检查更新…");
-    await api("/api/admin/update", { method: "POST", body: {}, admin: true });
-    toast("更新完成", "good");
-    await renderSubscriptions();
+    showLoading("正在启动追更…");
+    try {
+      await api("/api/admin/update", { method: "POST", body: { not_ignore: true }, admin: true });
+      toast("已开始追更，正在后台检查并下载可用的新剧集", "good");
+      setTimeout(() => { if (state.route === "subscriptions") renderSubscriptions(true); }, 4000);
+      setTimeout(() => { if (state.route === "subscriptions") renderSubscriptions(true); }, 12000);
+    } finally {
+      hideLoading();
+    }
   }
 
   function openAddDialog() {
@@ -857,34 +1161,95 @@
   async function renderCalendar(force = false) {
     setActions(`<button class="btn" data-action="refresh">刷新</button>`);
     const hasCache = Object.keys(state.calendar || {}).length > 0;
-    if (hasCache && !force) renderCalendarContent();
-    else view.innerHTML = loadingCards(7);
-    const data = await api("/api/calendar");
-    state.calendar = data || {};
-    preloadCovers(Object.values(state.calendar).flat());
-    renderCalendarContent();
+    if (hasCache) renderCalendarContent();
+    if (!hasCache || force) {
+      if (!hasCache) view.innerHTML = loadingCards(7);
+      const data = await api("/api/calendar");
+      if (state.route !== "calendar") return;
+      state.calendar = data || {};
+      preloadCovers(Object.values(state.calendar).flat());
+      renderCalendarContent();
+      return;
+    }
+    api("/api/calendar").then((data) => {
+      if (state.route !== "calendar") return;
+      state.calendar = data || {};
+      renderCalendarContent();
+    }).catch(() => {});
+  }
+
+  async function calendarCatchup(namesArg = "") {
+    let names = [];
+    if (namesArg) {
+      names = namesArg.split("|").map((name) => name.trim()).filter(Boolean);
+    } else {
+      const data = state.calendar || {};
+      for (const items of Object.values(data)) {
+        for (const item of (Array.isArray(items) ? items : [])) {
+          if (item.followed && item.bangumi_name) names.push(item.bangumi_name);
+        }
+      }
+    }
+    names = [...new Set(names)];
+    if (!names.length) {
+      toast("本周没有已订阅的番剧可追更", "warn");
+      return;
+    }
+    showLoading(`正在启动追更 ${names.length} 部番剧…`);
+    try {
+      await api("/api/admin/update", { method: "POST", body: { names, not_ignore: true }, admin: true });
+      toast(`已开始追更 ${names.length} 部番剧，后台处理中`, "good");
+      setTimeout(() => { if (state.route === "calendar") renderCalendar(true); if (state.route === "subscriptions") renderSubscriptions(true); }, 4000);
+      setTimeout(() => { if (state.route === "calendar") renderCalendar(true); if (state.route === "subscriptions") renderSubscriptions(true); }, 12000);
+    } finally {
+      hideLoading();
+    }
   }
 
   function renderCalendarContent() {
     const data = state.calendar || {};
     const order = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
     const todayKey = order[(new Date().getDay() + 6) % 7];
+    const allFollowedNames = [];
+    const weekMissing = [];
+    for (const day of order) {
+      for (const item of (Array.isArray(data[day]) ? data[day] : [])) {
+        if (item.followed && item.bangumi_name) allFollowedNames.push(item.bangumi_name);
+      }
+    }
+    const uniqueFollowed = [...new Set(allFollowedNames)];
+    setActions(`<button class="btn" data-action="refresh">刷新</button>${uniqueFollowed.length ? `<button class="btn primary" data-action="calendar-catchup">追更本周 (${uniqueFollowed.length})</button>` : ""}`);
+
     view.innerHTML = `<div class="roads">${order.map((day) => {
       const items = Array.isArray(data[day]) ? data[day] : [];
+      const followedNames = items.filter((item) => item.followed && item.bangumi_name).map((item) => item.bangumi_name);
       return `
         <section class="panel" id="day-${day}">
-          <div class="panel-head"><h2>${dayName(day)}</h2><span class="badge ${day === todayKey ? "good" : "muted"}">${items.length} 部</span></div>
-          ${items.length ? `<div class="grid card-grid">${items.map((item, index) => `
+          <div class="panel-head">
+            <h2>${dayName(day)}</h2>
+            <span class="badge ${day === todayKey ? "good" : "muted"}">${items.length} 部</span>
+            ${followedNames.length ? `<button class="btn small" data-action="calendar-catchup-day" data-names="${esc(followedNames.join("|"))}">追更当日</button>` : ""}
+          </div>
+          ${items.length ? `<div class="grid card-grid">${items.map((item, index) => {
+            const installed = Number(item.installed_count || (Array.isArray(item.installed_episodes) ? item.installed_episodes.length : 0) || 0);
+            const downloaded = !!item.downloaded;
+            const badges = [];
+            if (item.followed) badges.push(`<span class="badge ${installed > 0 ? "good" : "warn"}">已装 ${installed} 集</span>`);
+            else badges.push('<span class="badge muted">未订阅</span>');
+            if (downloaded) badges.push('<span class="badge good">已缓存</span>');
+            return `
             <article class="show-card" data-action="open-calendar-item" data-name="${esc(item.name)}" data-cover="${esc(item.cover || "")}" data-day="${esc(item.update_day || "")}" data-list-day="${esc(day)}" data-card-index="${index}" data-episode="${Number(item.episode || 0)}" data-subtitles="${esc((item.subtitle_group || []).join(","))}" data-status="${Number(item.status || 0)}">
               <div class="cover-wrap">
                 <div class="cover-fallback">${esc((item.name || "?").slice(0, 1))}</div>
-                ${item.cover ? `<img class="cover" loading="eager" src="${esc(coverURL(item.cover))}" alt="" onerror="this.remove()" />` : ""}
+                ${coverImgTag(coverURL(item.cover), "", "cover", "", index < 8)}
               </div>
               <div class="show-meta">
                 <div class="show-name">${esc(item.name)}</div>
-                <div class="show-sub"><span>EP ${Number(item.episode || 0)}</span><span>${esc(dayName(item.update_day || ""))}</span></div>
+                <div class="show-sub"><span>源 ${Number(item.episode || 0)}</span><span>${esc(dayName(item.update_day || ""))}</span></div>
+                <div class="chips" style="margin-top:6px">${badges.join("")}</div>
               </div>
-            </article>`).join("")}</div>` : `<p class="muted small">今天没有放送。</p>`}
+            </article>`;
+          }).join("")}</div>` : `<p class="muted small">今天没有放送。</p>`}
         </section>`;
     }).join("")}</div>`;
   }
@@ -928,7 +1293,7 @@
 
 
   // ---------- kazumi timeline / recommend ----------
-  function kazumiCard(item) {
+  function kazumiCard(item, index = -1) {
     const name = item.name_cn || item.name || "未知番剧";
     const cover = coverURL(item.cover);
     const score = Number(item.score || 0);
@@ -936,10 +1301,10 @@
     const tags = (item.meta_tags || []).slice(0, 2).join(" · ");
     const badgeClass = score >= 7.5 ? "good" : score > 0 ? "" : "muted";
     return `
-      <article class="show-card" data-action="open-kazumi-subject" data-id="${esc(item.id)}">
+      <article class="show-card" data-action="open-kazumi-subject" data-id="${esc(item.id)}" data-card-index="${index}">
         <div class="cover-wrap">
           <div class="cover-fallback">${esc(name.slice(0, 1))}</div>
-          ${cover ? `<img class="cover" loading="eager" src="${esc(cover)}" alt="${esc(name)}" onerror="this.remove()" />` : ""}
+          ${coverImgTag(cover, name, "cover", "", index >= 0 && index < 8)}
         </div>
         <div class="show-meta">
           <div class="show-name">${esc(name)}</div>
@@ -949,26 +1314,45 @@
   }
 
   async function renderKazumiTimeline(force = false) {
-    setActions(`<button class="btn" data-action="refresh">刷新</button>`);
-    if (state.timeline.days.length && !force) renderTimelineContent();
-    else view.innerHTML = loadingCards(12);
-    const payload = await api("/api/kazumi/timeline");
-    state.timeline.days = payload.days || [];
-    const today = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date().getDay()];
-    if (!state.timeline.day || !state.timeline.days.some((day) => day.weekday === state.timeline.day)) {
-      state.timeline.day = today;
+    setActions(`<button class="btn" data-action="refresh">刷新</button><button class="btn" data-action="kazumi-browse-refresh">更新缓存</button><button class="btn" data-action="kazumi-browse-clear">清除缓存</button>`);
+    const hasCache = state.timeline.days.length > 0;
+    if (hasCache) renderTimelineContent();
+    const url = force ? "/api/kazumi/timeline?refresh=1" : "/api/kazumi/timeline";
+    if (!hasCache || force) {
+      if (!hasCache) view.innerHTML = loadingCards(12);
+      try {
+        const payload = await api(url, { timeout: 12000 });
+        if (state.route !== "timeline") return;
+        state.timeline.days = payload.days || [];
+        const today = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date().getDay()];
+        if (!state.timeline.day || !state.timeline.days.some((day) => day.weekday === state.timeline.day)) {
+          state.timeline.day = today;
+        }
+        renderTimelineContent();
+      } catch (err) {
+        if (state.route !== "timeline") return;
+        if (!hasCache) view.innerHTML = emptyState("!", err.message || String(err));
+      }
+      return;
     }
-    renderTimelineContent();
+    api("/api/kazumi/timeline", { timeout: 12000 }).then((payload) => {
+      if (state.route !== "timeline") return;
+      const days = payload.days || [];
+      const next = JSON.stringify(days.map((d) => [d.weekday, (d.items || []).map((i) => i.id)]));
+      const prev = JSON.stringify((state.timeline.days || []).map((d) => [d.weekday, (d.items || []).map((i) => i.id)]));
+      state.timeline.days = days;
+      if (next !== prev) renderTimelineContent();
+    }).catch(() => {});
   }
 
   function renderTimelineContent() {
     const days = state.timeline.days;
-    preloadCovers(days.flatMap((day) => day.items || []));
     if (!days.length) {
       view.innerHTML = emptyState("◫", "时间表暂时不可用，请稍后刷新");
       return;
     }
     const day = days.find((item) => item.weekday === state.timeline.day) || days[0];
+    preloadCovers(day.items || []);
     const chips = days.map((item) => `
       <button class="chip ${item.weekday === day.weekday ? "active" : ""}" data-action="timeline-day" data-day="${esc(item.weekday)}">
         ${esc(item.label)} <span class="badge muted">${item.items.length}</span>
@@ -977,61 +1361,186 @@
       <section class="panel">
         <div class="panel-head"><h2>${esc(day.label)}放送</h2><span class="badge">${day.items.length} 部</span><div class="spacer"></div><span class="muted small">数据来自 Bangumi · 点击卡片查看详情</span></div>
         <div class="chips" style="margin-bottom:18px">${chips}</div>
-        ${day.items.length ? `<div class="grid card-grid">${day.items.map(kazumiCard).join("")}</div>` : emptyState("◌", "今天没有放送安排")}
+        ${day.items.length ? `<div class="grid card-grid" id="timeline-grid"></div>` : emptyState("◌", "今天没有放送安排")}
       </section>`;
+    if (day.items.length) {
+      const expected = day.weekday;
+      renderGridChunked(document.getElementById("timeline-grid"), day.items, kazumiCard, () => state.route === "timeline" && (state.timeline.days.find((d) => d.weekday === state.timeline.day) || state.timeline.days[0] || {}).weekday === expected);
+    }
   }
 
   const recommendTags = ["", "日常", "原创", "校园", "搞笑", "奇幻", "百合", "恋爱", "悬疑", "热血", "后宫", "机战", "轻改", "偶像", "治愈", "异世界"];
 
   let recommendSearchTimer = null;
   let recommendRequestId = 0;
+  let recommendAbort = null;
+  let recommendCategoriesGeneration = 0;
 
   async function renderKazumiRecommend(force = false) {
-    setActions(`<button class="btn" data-action="refresh">刷新</button>`);
+    setActions(`<button class="btn" data-action="refresh">刷新</button><button class="btn" data-action="kazumi-browse-refresh">更新缓存</button><button class="btn" data-action="kazumi-browse-clear">清除缓存</button>`);
     const hasCache = state.recommend.subjects.length > 0;
-    if (hasCache && !force) renderRecommendPage();
-    await loadRecommendations(state.recommend.query || "", !hasCache || force, hasCache && !force);
+    if (hasCache) renderRecommendPage();
+    if (!state.recommend.categoriesLoaded) loadRecommendationCategories().catch(() => {});
+    if (!hasCache || force) {
+      if (!hasCache) view.innerHTML = `<section class="panel">${loadingCards(1)}<p class="muted small" style="text-align:center">正在请求 Bangumi，正在尝试直连与已配置的镜像…</p></section>`;
+      loadRecommendations(state.recommend.query || "", !hasCache || force, false).catch(() => {});
+      return;
+    }
+    loadRecommendations(state.recommend.query || "", false, true).catch(() => {});
+  }
+
+  // Load every cached recommendation category in one request. After the
+  // browse cache has been refreshed this makes category chips switch without
+  // touching the network.
+  async function loadRecommendationCategories(retry = 0, generation = null) {
+    if (retry === 0) {
+      state.recommend.categoriesLoaded = true;
+      generation = ++recommendCategoriesGeneration;
+    }
+    if (generation !== recommendCategoriesGeneration) return;
+    let payload;
+    try {
+      payload = await api("/api/kazumi/recommend/all", { timeout: 10000 });
+    } catch (err) {
+      if (retry === 0) state.recommend.categoriesLoaded = false;
+      throw err;
+    }
+    if (generation !== recommendCategoriesGeneration) return;
+    const categories = payload && payload.categories ? payload.categories : {};
+    let current = null;
+    let known = 0;
+    for (const [tag, subjects] of Object.entries(categories)) {
+      if (!Array.isArray(subjects) || !subjects.length) continue;
+      known++;
+      const key = `${tag}|`;
+      const existing = state.recommend.cache[key];
+      if (existing && existing.subjects && existing.subjects.length >= subjects.length) continue;
+      state.recommend.cache[key] = { at: Date.now(), subjects: subjects.slice() };
+      if (!state.recommend.query && tag === (state.recommend.tag || "")) {
+        current = state.recommend.subjects = subjects.slice();
+        // A slow network request for this category is now unnecessary.
+        if (recommendAbort) {
+          try { recommendAbort.abort(); } catch (_) {}
+          recommendAbort = null;
+        }
+      }
+    }
+    if (current) {
+      preloadCovers(current);
+      if (state.route === "recommend" && document.getElementById("recommend-grid")) {
+        const grid = document.getElementById("recommend-grid");
+        grid.style.opacity = "1";
+        renderGridChunked(grid, current, kazumiCard, () => state.route === "recommend");
+        const count = document.querySelector("#view .panel-head .badge");
+        if (count) count.textContent = `${current.length} 部`;
+        const status = document.getElementById("recommend-status");
+        if (status) status.textContent = "";
+      }
+    }
+    // The backend warms missing categories in the background. Poll a few
+    // times so the chips become instant as the caches fill up.
+    if (known < recommendTags.length && retry < 3) {
+      const delay = [1200, 3000, 6000][retry];
+      setTimeout(() => {
+        loadRecommendationCategories(retry + 1, generation).catch(() => {});
+      }, delay);
+    }
   }
 
   async function loadRecommendations(keyword = "", fullRender = false, silent = false) {
     const tag = state.recommend.tag || "";
     state.recommend.query = keyword;
     const requestId = ++recommendRequestId;
+    const cacheKey = `${tag}|${keyword}`;
+    const cache = (state.recommend.cache && state.recommend.cache[cacheKey]) || null;
+    const now = Date.now();
     const url = `/api/kazumi/recommend?limit=24&tag=${encodeURIComponent(tag)}&keyword=${encodeURIComponent(keyword)}`;
-    if (fullRender) {
+    const status = document.getElementById("recommend-status");
+    const grid = document.getElementById("recommend-grid");
+
+    // Stale-while-revalidate: show cached results instantly when switching.
+    if (cache && cache.subjects) {
+      state.recommend.subjects = cache.subjects.slice();
+      preloadCovers(state.recommend.subjects);
+      const gridEl = document.getElementById("recommend-grid");
+      const statusEl = document.getElementById("recommend-status");
+      if (fullRender || !gridEl) {
+        renderRecommendPage();
+      } else {
+        const title = document.querySelector("#view .panel-head h2");
+        const count = document.querySelector("#view .panel-head .badge");
+        gridEl.style.opacity = "0.92";
+        if (!state.recommend.subjects.length) gridEl.innerHTML = emptyState("★", keyword ? "没有找到匹配的番剧，试试其他关键词" : "没有找到推荐番剧");
+        else renderGridChunked(gridEl, state.recommend.subjects, kazumiCard, () => state.route === "recommend");
+        if (title) title.textContent = keyword ? "搜索结果" : "热门番组";
+        if (count) count.textContent = `${state.recommend.subjects.length} 部`;
+        if (statusEl && !silent) statusEl.innerHTML = `<span class="spin"></span> 正在更新内容…`;
+      }
+      if (now - (cache.at || 0) < 120000) {
+        const s = document.getElementById("recommend-status");
+        const g = document.getElementById("recommend-grid");
+        if (s) s.textContent = "";
+        if (g) g.style.opacity = "1";
+        return;
+      }
+    } else if (fullRender) {
       view.innerHTML = `<section class="panel">${loadingCards(1)}<p class="muted small" style="text-align:center">正在请求 Bangumi，正在尝试直连与已配置的镜像…</p></section>`;
     } else if (!silent) {
-      const grid = document.getElementById("recommend-grid");
-      if (grid) grid.innerHTML = `<div class="empty"><span class="spin"></span><div class="muted small" style="margin-top:10px">正在搜索 Bangumi…</div></div>`;
+      if (status) status.innerHTML = `<span class="spin"></span> 正在加载内容…`;
+      if (grid) grid.style.opacity = "0.7";
+      if (!grid && !status) renderRecommendPage();
+    } else {
+      if (status) status.textContent = "";
+      if (grid) grid.style.opacity = "1";
     }
+
     let payload;
     try {
-      payload = await api(url);
+      if (recommendAbort) recommendAbort.abort();
+      recommendAbort = new AbortController();
+      payload = await api(url, { signal: recommendAbort.signal, timeout: keyword ? 12000 : 10000 });
     } catch (err) {
+      const message = err.message || String(err);
+      if (message === "请求已取消") return;
       if (requestId === recommendRequestId) {
-        const message = err.message || String(err);
-        showNotice("搜索失败", message, "bad");
-        const failed = emptyState("!", `搜索失败：${message}`);
-        if (fullRender) {
-          view.innerHTML = `<section class="panel">${failed}</section>`;
+        if (cache && cache.subjects) {
+          const statusEl = document.getElementById("recommend-status");
+          const gridEl = document.getElementById("recommend-grid");
+          if (statusEl) statusEl.innerHTML = `<span class="badge warn">网络较慢</span> <span class="muted small">已显示缓存结果</span>`;
+          if (gridEl) gridEl.style.opacity = "1";
         } else {
-          const grid = document.getElementById("recommend-grid");
-          if (grid) grid.innerHTML = failed;
+          showNotice("搜索失败", message, "bad");
+          const statusEl = document.getElementById("recommend-status");
+          const gridEl = document.getElementById("recommend-grid");
+          if (fullRender) {
+            view.innerHTML = `<section class="panel">${emptyState("!", `搜索失败：${message}`)}</section>`;
+          } else {
+            if (statusEl) statusEl.innerHTML = `<span class="badge bad">加载失败</span> <span class="muted small">${esc(message)}</span>`;
+            if (gridEl) gridEl.style.opacity = "1";
+          }
         }
       }
       return;
     }
     if (requestId !== recommendRequestId || state.route !== "recommend") return;
+    state.recommend.cache[cacheKey] = { at: Date.now(), subjects: (payload.subjects || []).slice() };
     state.recommend.subjects = payload.subjects || [];
     preloadCovers(state.recommend.subjects);
     if (payload.fallback) showNotice("在线搜索暂不可用", "已显示本地时间表中匹配的番剧。可在设置或 Kazumi Files 中添加可用的 Bangumi 镜像后重试。", "warn");
     if (!fullRender && document.getElementById("recommend-grid")) {
-      const grid = document.getElementById("recommend-grid");
-      if (grid) grid.innerHTML = recommendCardsHtml();
+      const gridEl = document.getElementById("recommend-grid");
+      const statusEl = document.getElementById("recommend-status");
+      if (gridEl) {
+        gridEl.style.opacity = "1";
+        if (!state.recommend.subjects.length) gridEl.innerHTML = emptyState("★", keyword ? "没有找到匹配的番剧，试试其他关键词" : "没有找到推荐番剧");
+        else renderGridChunked(gridEl, state.recommend.subjects, kazumiCard, () => state.route === "recommend");
+      }
+      if (statusEl) statusEl.textContent = "";
       const count = document.querySelector("#view .panel-head .badge");
       if (count) count.textContent = `${state.recommend.subjects.length} 部`;
       const title = document.querySelector("#view .panel-head h2");
       if (title) title.textContent = keyword ? "搜索结果" : "热门番组";
+      preloadCovers(state.recommend.subjects);
       return;
     }
     renderRecommendPage();
@@ -1048,8 +1557,14 @@
         <div class="panel-head"><h2>${keyword ? "搜索结果" : "热门番组"}</h2><span class="badge">${state.recommend.subjects.length} 部</span><div class="spacer"></div><span class="muted small">数据来自 Bangumi · 点击卡片查看详情</span></div>
         <div class="toolbar" style="margin-bottom:14px"><div class="searchbox grow"><input id="recommend-search" type="search" placeholder="搜索 Bangumi 番剧…" value="${esc(keyword)}" /></div><button class="btn" id="recommend-search-btn">搜索</button></div>
         <div class="chips" style="margin-bottom:18px">${chips}</div>
-        <div id="recommend-grid">${recommendCardsHtml()}</div>
+        <div id="recommend-status" class="muted small" style="min-height:20px;margin-bottom:8px"></div>
+        <div class="grid card-grid" id="recommend-grid"></div>
       </section>`;
+    const grid = document.getElementById("recommend-grid");
+    if (grid) {
+      if (!state.recommend.subjects.length) grid.outerHTML = emptyState("★", state.recommend.query ? "没有找到匹配的番剧，试试其他关键词" : "没有找到推荐番剧");
+      else renderGridChunked(grid, state.recommend.subjects, kazumiCard, () => state.route === "recommend");
+    }
     const input = document.getElementById("recommend-search");
     if (input) {
       input.addEventListener("input", () => {
@@ -1078,7 +1593,7 @@
     if (!state.recommend.subjects.length) {
       return emptyState("★", state.recommend.query ? "没有找到匹配的番剧，试试其他关键词" : "没有找到推荐番剧");
     }
-    return `<div class="grid card-grid">${state.recommend.subjects.map(kazumiCard).join("")}</div>`;
+    return `<div class="grid card-grid">${state.recommend.subjects.map((item, index) => kazumiCard(item, index)).join("")}</div>`;
   }
 
   const collectionTypes = [
@@ -1089,6 +1604,104 @@
     [5, "抛弃"],
   ];
 
+  function cancelDetailLoad() {
+    if (state.detailAbort) {
+      try { state.detailAbort.abort(); } catch (_) {}
+      state.detailAbort = null;
+    }
+    if (detailPrefetchTimer) {
+      clearTimeout(detailPrefetchTimer);
+      detailPrefetchTimer = null;
+    }
+    for (const timer of state.detailTimers || []) clearTimeout(timer);
+    state.detailTimers = [];
+  }
+
+  let detailPrefetchTimer = null;
+  let lastDetailOpenAt = 0;
+
+  // In-memory detail cache. It is populated by normal detail requests and by
+  // background prefetches for the adjacent cards, so previous/next remains
+  // instant after the browse cache has been refreshed.
+  const detailMemory = new Map();
+  const detailMemoryTTL = 5 * 60 * 1000;
+  const detailPrefetching = new Set();
+
+  function rememberedDetail(subjectId) {
+    const id = Number(subjectId || 0);
+    if (!id) return null;
+    const entry = detailMemory.get(id);
+    if (!entry) return null;
+    if (Date.now() - entry.at > detailMemoryTTL) {
+      detailMemory.delete(id);
+      return null;
+    }
+    return entry;
+  }
+
+  function rememberDetailSubject(subjectId, subject) {
+    const id = Number(subjectId || 0);
+    if (!id || !subject) return;
+    const current = detailMemory.get(id);
+    detailMemory.set(id, {
+      subject,
+      sections: current ? current.sections || null : null,
+      at: Date.now(),
+    });
+  }
+
+  function rememberDetailSection(subjectId, tab, payload) {
+    const id = Number(subjectId || 0);
+    const entry = id ? detailMemory.get(id) : null;
+    if (!entry) return;
+    entry.sections = { ...(entry.sections || {}), [tab]: payload };
+    entry.at = Date.now();
+  }
+
+  function rememberedDetailSection(subjectId, tab) {
+    const entry = rememberedDetail(subjectId);
+    return entry && entry.sections ? entry.sections[tab] || null : null;
+  }
+
+  function prefetchDetailSubject(subjectId) {
+    const id = Number(subjectId || 0);
+    if (!id || detailPrefetching.has(id)) return;
+    const existing = detailMemory.get(id);
+    if (existing && Date.now() - existing.at < detailMemoryTTL) return;
+    detailPrefetching.add(id);
+    api(`/api/kazumi/subject/${id}?local=1`, { timeout: 6000 }).then((payload) => {
+      if (!payload || payload.cached === false || !payload.subject) return;
+      const current = detailMemory.get(id);
+      detailMemory.set(id, {
+        subject: payload.subject,
+        sections: current ? current.sections || null : null,
+        at: Date.now(),
+      });
+    }).catch(() => {}).finally(() => detailPrefetching.delete(id));
+  }
+
+  function prefetchAdjacentDetail(items, index, delta = 0) {
+    const list = Array.isArray(items) ? items : [];
+    const current = Number(index);
+    if (!list.length || !Number.isInteger(current) || current < 0) return;
+    const direction = Number(delta || 0);
+    const offsets = direction > 0 ? [1, 2] : direction < 0 ? [-1, -2] : [-2, -1, 1, 2];
+    for (const offset of offsets) {
+      const item = list[current + offset];
+      if (item && item.subjectId) prefetchDetailSubject(item.subjectId);
+    }
+  }
+
+  function schedulePrefetchAdjacentDetail(items, index, delta = 0) {
+    if (detailPrefetchTimer) clearTimeout(detailPrefetchTimer);
+    // Wait for a short pause so rapid previous/next clicks do not queue up
+    // extra background detail requests, then warm the direction of travel.
+    detailPrefetchTimer = setTimeout(() => {
+      detailPrefetchTimer = null;
+      prefetchAdjacentDetail(items, index, delta);
+    }, 220);
+  }
+
   async function openSubjectDetail(options = {}) {
     modalBody.classList.remove("player-mode");
     const local = options.local || null;
@@ -1097,6 +1710,13 @@
     const navItems = Array.isArray(options.navItems) ? options.navItems : [];
     let navIndex = Number(options.navIndex);
     if (!Number.isInteger(navIndex) || navIndex < 0 || navIndex >= navItems.length) navIndex = -1;
+    const localOnly = !!options.localOnly;
+    const navDelta = Number(options.navDelta || 0);
+    cancelDetailLoad();
+    const controller = new AbortController();
+    state.detailAbort = controller;
+    const timers = [];
+    state.detailTimers = timers;
     state.detail = {
       subjectId,
       subject: null,
@@ -1108,29 +1728,113 @@
       collectionLoaded: false,
       navItems,
       navIndex,
+      localOnly,
+      loading: !!(subjectId || name),
+      loadError: "",
     };
-    modalBody.innerHTML = `<div class="empty"><span class="spin"></span><div class="muted small" style="margin-top:10px">正在加载详情…</div></div>`;
+    const remembered = subjectId ? rememberedDetail(subjectId) : null;
+    if (remembered && remembered.subject) {
+      applySubjectMeta({ subject: remembered.subject });
+      if (remembered.sections) state.detail.sections = { ...remembered.sections };
+      state.detail.loading = false;
+    }
     openDialog(modal);
-    showLoading("正在加载详情…");
-    try {
-      if (state.detail.subjectId) {
-        const payload = await api(`/api/kazumi/subject/${state.detail.subjectId}`);
-        applySubjectMeta(payload);
-      } else if (name) {
-        try {
-          const payload = await api(`/api/kazumi/lookup?name=${encodeURIComponent(name)}`);
-          applySubjectMeta(payload);
-        } catch (_) {
-          state.detail.subject = null;
+    renderDetail();
+    // Warm the previous/next cards. The first open prefetches immediately;
+    // rapid clicking is debounced so extra requests do not pile up.
+    const now = Date.now();
+    const rapidNavigation = now - lastDetailOpenAt < 600;
+    lastDetailOpenAt = now;
+    if (rapidNavigation) {
+      schedulePrefetchAdjacentDetail(navItems, navIndex, navDelta);
+    } else {
+      prefetchAdjacentDetail(navItems, navIndex, navDelta);
+    }
+    const requestId = (state.detail._requestId = (state.detail._requestId || 0) + 1);
+    const alive = () => state.detail._requestId === requestId && !controller.signal.aborted;
+    const localQuery = localOnly ? "?local=1" : "";
+    (async () => {
+      try {
+        if (subjectId) {
+          // Local-only navigation can use the remembered copy directly. When
+          // the cache was refreshed before browsing, this is the same data
+          // the server would return, so avoid another round trip.
+          const cached = rememberedDetail(subjectId);
+          if (!(localOnly && cached && cached.subject)) {
+            const payload = await api(`/api/kazumi/subject/${subjectId}${localQuery}`, { signal: controller.signal, timeout: localOnly ? 4000 : 12000 });
+            if (!alive() || state.detail.subjectId !== subjectId) return;
+            applySubjectMeta(payload);
+            if (payload.subject) rememberDetailSubject(subjectId, payload.subject);
+          }
+        } else if (name) {
+          try {
+            const payload = await api(`/api/kazumi/lookup?name=${encodeURIComponent(name)}${localOnly ? "&local=1" : ""}`, { signal: controller.signal, timeout: localOnly ? 4000 : 12000 });
+            if (!alive() || state.detail.name !== name) return;
+            applySubjectMeta(payload);
+            const resolved = Number(payload.subject_id || (payload.subject && payload.subject.id) || 0);
+            if (resolved && payload.subject) rememberDetailSubject(resolved, payload.subject);
+          } catch (err) {
+            if (err && err.name === "AbortError") return;
+            if (alive()) state.detail.subject = null;
+          }
+        }
+      } catch (err) {
+        if (err && err.name === "AbortError") return;
+        if (alive()) state.detail.loadError = err.message || String(err);
+      } finally {
+        if (alive()) {
+          state.detail.loading = false;
+          renderDetail();
         }
       }
-    } catch (err) {
-      toast(err.message || String(err), "warn");
-    } finally {
-      hideLoading();
+      if (!alive() || !state.detail.subjectId) return;
+      renderDetail();
+      if (state.token && !localOnly) loadCollectionType(state.detail.subjectId, controller.signal).catch(() => {});
+      // Prefetch sections lazily; local-only navigation never touches the network.
+      const hasLocalDetail = localOnly || !!((state.detail.local && (state.detail.local.downloaded || (state.detail.local.player && Object.keys(state.detail.local.player).length))));
+      const prefetchDelay = hasLocalDetail ? 500 : 200;
+      timers.push(setTimeout(() => {
+        if (!alive() || !state.detail.subjectId) return;
+        for (const tab of ["characters", "relations"]) {
+          if (!state.detail.sections[tab]) prefetchDetailSection(tab, requestId, controller.signal).catch(() => {});
+        }
+        timers.push(setTimeout(() => {
+          if (!alive() || !state.detail.subjectId) return;
+          for (const tab of ["staff", "comments"]) {
+            if (!state.detail.sections[tab]) prefetchDetailSection(tab, requestId, controller.signal).catch(() => {});
+          }
+        }, hasLocalDetail ? 700 : 700));
+      }, prefetchDelay));
+    })();
+  }
+
+  async function prefetchDetailSection(tab, requestId = state.detail._requestId, signal = null) {
+    const endpoint = { comments: "comments", characters: "characters", relations: "relations", staff: "staff" }[tab];
+    if (!endpoint || !state.detail.subjectId || (state.detail.sections[tab] && state.detail.sections[tab].loading)) return;
+    const subjectId = state.detail.subjectId;
+    const rid = requestId;
+    if (!state.detail.sections[tab]) {
+      const rememberedSection = rememberedDetailSection(subjectId, tab);
+      if (rememberedSection) {
+        state.detail.sections[tab] = rememberedSection;
+        if (state.detail._requestId === rid && state.detail.tab === tab) renderDetail();
+        return;
+      }
     }
-    renderDetail();
-    if (state.detail.subjectId && state.token) loadCollectionType(state.detail.subjectId);
+    const suffix = state.detail.localOnly ? "?local=1" : "";
+    state.detail.sections[tab] = { loading: true };
+    try {
+      const payload = await api(`/api/kazumi/subject/${subjectId}/${endpoint}${suffix}`, signal ? { signal } : {});
+      if (state.detail._requestId !== rid || state.detail.subjectId !== subjectId) return;
+      state.detail.sections[tab] = payload;
+      rememberDetailSection(subjectId, tab, payload);
+    } catch (err) {
+      if (err && err.name === "AbortError") return;
+      if (state.detail._requestId !== rid || state.detail.subjectId !== subjectId) return;
+      // Keep prefetch failures silent/non-sticky so opening the tab can retry.
+      state.detail.sections[tab] = null;
+    }
+    if (state.detail._requestId === rid && state.detail.tab === tab) renderDetail();
   }
 
   function applySubjectMeta(payload) {
@@ -1177,8 +1881,12 @@
     const index = Number(state.detail.navIndex);
     const next = index + Number(delta || 0);
     if (!delta || index < 0 || next < 0 || next >= items.length) return;
+    const now = Date.now();
+    if (state.detailNavLock && now - state.detailNavLock < 60) return;
+    state.detailNavLock = now;
     modalBody.scrollTop = 0;
-    await openSubjectDetail({ ...items[next], navItems: items, navIndex: next });
+    // Previous/next navigation is local-only so it never waits for the network.
+    await openSubjectDetail({ ...items[next], navItems: items, navIndex: next, localOnly: true, navDelta: Number(delta || 0) });
   }
 
   function renderDetail() {
@@ -1186,7 +1894,7 @@
     const local = state.detail.local || {};
     const name = detailName();
     const cover = detailCover();
-    const score = Number(subject.score || 0);
+    const score = Number(subject.score || local.score || 0);
     const metaTags = (subject.meta_tags || []).map((tag) => `<span class="badge muted">${esc(tag)}</span>`).join("");
     const localLine = local.bangumi_name
       ? `<span class="badge">订阅中</span><span class="muted small">更新日 ${esc(dayName(local.update_day))} · EP ${Number(local.episode || 0)}</span>`
@@ -1206,7 +1914,7 @@
     modalBody.innerHTML = `
       ${detailNavigation()}
       <div class="detail-hero">
-        ${cover ? `<img class="cover" src="${esc(cover)}" data-action="open-image" data-src="${esc(cover)}" data-title="${esc(name)}" alt="" onerror="this.remove()" />` : `<div class="cover-fallback">${esc(name.slice(0, 1))}</div>`}
+        ${cover ? `<img class="cover" referrerpolicy="no-referrer" src="${esc(cover)}" data-action="open-image" data-src="${esc(cover)}" data-title="${esc(name)}" alt="" onerror="this.remove()" />` : `<div class="cover-fallback">${esc(name.slice(0, 1))}</div>`}
         <div style="flex:1;min-width:0">
           <div class="chips" style="margin-bottom:8px">${localLine}</div>
           <h2>${esc(name)}</h2>
@@ -1281,26 +1989,50 @@
           <button class="btn primary" data-action="link-bangumi-submit">关联</button>
         </div>
       </div>` : "";
+    const hasContent = !!(subject.summary || info || tags || localBlock);
+    const loadingBlock = state.detail.loading && !hasContent ? `
+      <div class="panel" style="background:rgba(255,255,255,.03);margin-top:16px">
+        <div class="empty" style="padding:18px 10px"><span class="spin"></span><div class="muted small" style="margin-top:10px">正在加载番剧详情，请稍候…</div></div>
+      </div>` : "";
+    const emptyBlock = !state.detail.loading && !hasContent ? emptyState("◌", state.detail.loadError ? "详情暂时不可用，可稍后重试" : "暂无更多信息") : "";
     return `
       ${localBlock}
       ${linkBlock}
+      ${loadingBlock}
       ${subject.summary ? `<div class="divider"></div><div style="white-space:pre-wrap;line-height:1.75;color:var(--muted);font-size:13px">${esc(subject.summary)}</div>` : ""}
       ${info ? `<div class="divider"></div><h3 style="margin:0 0 10px">详细信息</h3>${info}` : ""}
       ${tags ? `<div class="divider"></div><h3 style="margin:0 0 10px">标签</h3><div class="chips">${tags}</div>` : ""}
-      ${!subject.summary && !info && !tags && !localBlock ? emptyState("◌", "暂无更多信息") : ""}
+      ${emptyBlock}
     `;
   }
 
   function renderComments(section) {
-    if (section.unavailable) return `<div class="empty"><div class="muted" style="margin-bottom:10px">${esc(section.message || "吐槽加载失败")}</div><button class="btn small" data-action="detail-retry" data-tab="comments">重试</button></div>`;
-    const items = section.items || [];
+    if (section && section.unavailable) {
+      return `
+        <div class="empty" style="padding:20px 10px">
+          <div class="muted" style="margin-bottom:8px">吐槽暂时不可用，可能是网络或镜像响应超时。</div>
+          <div class="muted small" style="margin-bottom:12px;opacity:.8">已自动尝试缓存与镜像；你可以稍后重试。</div>
+          <button class="btn small" data-action="detail-retry" data-tab="comments">重试加载吐槽</button>
+        </div>`;
+    }
+    const rawItems = Array.isArray(section) ? section : ((section && section.items) || []);
+    const items = rawItems.map((item) => {
+      if (!item || typeof item !== "object") return item;
+      const updated = item.updated_at || item.updatedAt || item.updated || item.createdAt || item.created_at;
+      return {
+        ...item,
+        comment: item.comment || item.content || "",
+        updated_at: updated || 0,
+        user: item.user || {},
+      };
+    });
     if (!items.length) return emptyState("…", "还没有吐槽");
     return `<div class="list">${items.map((item) => `
-      <div class="comment-row">
-        ${item.user && item.user.cover ? `<img class="avatar" src="${esc(coverURL(item.user.cover))}" data-action="open-image" data-src="${esc(coverURL(item.user.cover))}" data-title="${esc(item.user.nickname || item.user.username || "")}" alt="" onerror="this.remove()" />` : `<div class="avatar avatar-fallback">${esc((item.user && (item.user.nickname || item.user.username) || "?").slice(0, 1))}</div>`}
+      <div class="comment-row fade-in">
+        ${item.user && item.user.cover ? `<img class="avatar" src="${esc(coverURL(item.user.cover))}" referrerpolicy="no-referrer" loading="lazy" data-action="open-image" data-src="${esc(coverURL(item.user.cover))}" data-title="${esc(item.user.nickname || item.user.username || "")}" alt="" onerror="this.remove()" />` : `<div class="avatar avatar-fallback">${esc((item.user && (item.user.nickname || item.user.username) || "?").slice(0, 1))}</div>`}
         <div class="grow" style="flex:1;min-width:0">
           <div class="title">${esc(item.user && (item.user.nickname || item.user.username) || "匿名")} ${item.rate ? `<span class="badge warn">${item.rate} 分</span>` : ""}</div>
-          <div class="comment-text">${esc(item.comment || "")}</div>
+          <div class="comment-text" style="white-space:pre-wrap;line-height:1.6">${esc(item.comment || "")}</div>
           <div class="sub">${esc(formatTime(item.updated_at))}</div>
         </div>
       </div>`).join("")}</div>`;
@@ -1341,28 +2073,57 @@
       </div>`).join("")}</div>`;
   }
 
-  async function switchDetailTab(tab) {
+  async function switchDetailTab(tab, force = false) {
     if (!state.detail.subjectId) return;
     state.detail.tab = tab;
     const endpoint = { comments: "comments", characters: "characters", relations: "relations", staff: "staff" }[tab];
-    if (!endpoint || state.detail.sections[tab]) {
+    if (!endpoint) {
       renderDetail();
       return;
     }
+    const existing = state.detail.sections[tab];
+    if (!force && existing) {
+      // Auto-retry failed prefetch when user opens the tab.
+      if (existing.error) {
+        state.detail.sections[tab] = null;
+      } else if (existing.loading) {
+        renderDetail();
+        return;
+      } else {
+        renderDetail();
+        return;
+      }
+    }
+    if (state.detail.sections[tab]) {
+      renderDetail();
+      return;
+    }
+    const subjectId = state.detail.subjectId;
+    const rememberedSection = rememberedDetailSection(subjectId, tab);
+    if (rememberedSection) {
+      state.detail.sections[tab] = rememberedSection;
+      renderDetail();
+      return;
+    }
+    const suffix = state.detail.localOnly ? "?local=1" : "";
     state.detail.sections[tab] = { loading: true };
     renderDetail();
     try {
-      const payload = await api(`/api/kazumi/subject/${state.detail.subjectId}/${endpoint}`);
+      const payload = await api(`/api/kazumi/subject/${subjectId}/${endpoint}${suffix}`);
+      if (state.detail.subjectId !== subjectId) return;
       state.detail.sections[tab] = payload;
+      rememberDetailSection(subjectId, tab, payload);
     } catch (err) {
+      if (state.detail.subjectId !== subjectId) return;
       state.detail.sections[tab] = { error: err.message || String(err) };
     }
-    renderDetail();
+    if (state.detail.tab === tab) renderDetail();
   }
 
-  async function loadCollectionType(subjectId) {
+  async function loadCollectionType(subjectId, signal = null) {
     try {
-      const payload = await api(`/api/admin/bangumi/collection/${subjectId}`, { admin: true });
+      const payload = await api(`/api/admin/bangumi/collection/${subjectId}`, { admin: true, signal });
+      if (state.detail.subjectId !== subjectId) return;
       const type = Number(payload.type || 0);
       if (type > 0) state.detail.collectionType = type;
       state.detail.collectionLoaded = true;
@@ -1447,38 +2208,87 @@
   }
 
   async function startWatchingOnline(name) {
-    state.watch = { name, loading: true, sources: [], selected: null, roads: [], error: "" };
-    modalBody.innerHTML = `<div class="empty"><span class="spin"></span><div class="muted small" style="margin-top:10px">正在搜索已安装的播放来源…</div></div>`;
+    state.watch = { name, loading: true, sources: [], selected: null, roads: [], error: "", progress: { total: 0, done: 0 } };
     openDialog(modal);
-    showLoading("正在搜索播放来源…");
+    renderWatch();
+    let rules = [];
     try {
-      const payload = await api("/api/admin/kazumi/sources", { method: "POST", body: { keyword: name }, admin: true });
-      state.watch.sources = payload.sources || [];
-      state.watch.sources.sort((a, b) => Number(b.has_match) - Number(a.has_match) || a.rule.localeCompare(b.rule));
+      const payload = await api("/api/admin/kazumi/rules", { admin: true });
+      rules = (payload.rules || []).map((item) => item.name || item).filter(Boolean);
     } catch (err) {
       state.watch.error = err.message || String(err);
-    } finally {
-      hideLoading();
-    }
-    state.watch.loading = false;
-    renderWatch();
-    if (state.watch.error) {
+      state.watch.loading = false;
+      renderWatch();
       showNotice("搜索失败", state.watch.error, "bad");
-    } else if (!state.watch.sources.length) {
-      showNotice("未找到在线视频来源", "已安装规则没有找到可用来源。可以尝试弹窗中的别名，或先在 Kazumi Files 安装更多规则。", "warn");
+      return;
     }
+    if (!rules.length) {
+      state.watch.loading = false;
+      renderWatch();
+      showNotice("未找到播放源", "还没有安装播放规则。可先在 Kazumi Files 安装规则后重试。", "bad");
+      return;
+    }
+    state.watch.progress = { total: rules.length, done: 0 };
+    renderWatch();
+    const keyword = String(name || "").trim();
+    const normalizedKeyword = normalizeWatchName(keyword);
+    const limit = 4;
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(limit, rules.length) }, async () => {
+      while (cursor < rules.length) {
+        const index = cursor++;
+        const rule = rules[index];
+        try {
+          const result = await api("/api/admin/kazumi/search", { method: "POST", body: { rule, keyword }, admin: true });
+          const items = Array.isArray(result.results) ? result.results : [];
+          if (!items.length) {
+            state.watch.sources.push({ rule, name: "", source: "", has_match: false, error: "无结果" });
+          } else {
+            items.slice(0, 5).forEach((item) => {
+              const sourceName = item.name || "";
+              state.watch.sources.push({
+                rule,
+                name: sourceName,
+                source: item.src || "",
+                has_match: watchNameMatches(normalizedKeyword, sourceName),
+              });
+            });
+          }
+        } catch (err) {
+          state.watch.sources.push({ rule, name: "", source: "", error: err.message || String(err), has_match: false });
+        } finally {
+          state.watch.progress.done += 1;
+          state.watch.sources.sort((a, b) => Number(b.has_match) - Number(a.has_match) || String(a.rule).localeCompare(String(b.rule)) || String(a.name || "").localeCompare(String(b.name || "")));
+          if (!state.watch.selected) renderWatch();
+        }
+      }
+    });
+    await Promise.allSettled(workers);
+    state.watch.loading = false;
+    if (!state.watch.selected) renderWatch();
+    if (!state.watch.sources.some((item) => item.source && !item.error)) {
+      showNotice("未找到播放源", "已安装规则没有找到可用来源。可以尝试弹窗中的别名，或先在 Kazumi Files 安装更多规则。", "bad");
+    }
+  }
+
+  function normalizeWatchName(value) {
+    return String(value || "").toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]/g, "");
+  }
+
+  function watchNameMatches(keyword, name) {
+    const normalized = normalizeWatchName(name);
+    if (!keyword || !normalized) return false;
+    return normalized.includes(keyword) || keyword.includes(normalized);
   }
 
   function renderWatch() {
     const watch = state.watch;
     const title = watch.selected ? `${watch.name} · ${watch.selected.rule}` : watch.name;
     let body = "";
-    if (watch.loading) {
-      body = `<div class="empty"><span class="spin"></span><div class="muted small" style="margin-top:10px">正在搜索播放来源…</div></div>`;
-    } else if (watch.error) {
-      body = emptyState("!", watch.error);
-    } else if (watch.selected) {
+    if (watch.selected) {
       body = watchRoadsTemplate(watch.roads);
+    } else if (watch.error && !(watch.sources || []).length) {
+      body = emptyState("!", watch.error);
     } else {
       const sources = watch.sources || [];
       const rawAliases = [
@@ -1503,46 +2313,71 @@
         <button class="btn small" data-action="alias-add">添加别名</button>
         ${customAliases.length ? `<div class="chips">${customAliases.map((value) => `<span class="chip">${esc(value)} <button class="alias-remove" data-action="alias-remove" data-alias="${esc(value)}" title="删除别名">×</button></span>`).join("")}</div>` : ""}
       </div>` : "";
-      if (!sources.length) {
+      const progress = watch.progress || { total: 0, done: 0 };
+      const progressBar = watch.loading ? `
+        <div class="panel" style="margin-bottom:12px;padding:10px 12px;background:rgba(255,255,255,.03)">
+          <div style="display:flex;align-items:center;gap:10px"><span class="spin"></span><div class="muted small">正在并行搜索播放来源… ${progress.done}/${progress.total || "?"}</div></div>
+        </div>` : "";
+      if (!sources.length && watch.loading) {
+        body = aliasManage + aliasChips + progressBar + emptyState("⌕", "正在搜索已安装规则，请稍候…");
+      } else if (!sources.length) {
         body = aliasManage + aliasChips + emptyState("⌕", "已安装规则都没有找到可用来源，可尝试上面的别名，或先在 Kazumi Files 安装更多规则");
       } else {
-        body = aliasManage + aliasChips + `<div class="list">${sources.map((item, index) => `
+        body = aliasManage + aliasChips + progressBar + `<div class="list">${sources.map((item, index) => `
           <div class="row">
             <div class="grow">
               <div class="title">${esc(item.rule)} <span class="badge ${item.has_match ? "good" : "muted"}">${item.has_match ? "匹配" : "结果"}</span></div>
               <div class="sub">${item.error ? esc(item.error) : esc(item.name || "无结果")}</div>
             </div>
             <div class="actions">
-              ${item.error || !item.source ? `<span class="badge bad">不可用</span>` : `<button class="btn small primary" data-action="watch-source" data-index="${index}">选集</button>`}
+              ${item.error || !item.source ? `<span class="badge ${watch.loading ? "muted" : "bad"}">${watch.loading && !item.error && !item.source ? "等待中" : "不可用"}</span>` : `<button class="btn small primary" data-action="watch-source" data-index="${index}">选集</button>`}
             </div>
           </div>`).join("")}</div>`;
       }
     }
+    const scrollTop = modalBody.scrollTop;
+    const preserveScroll = !watch.selected && (watch.loading || (watch.sources || []).length > 0);
     modalBody.innerHTML = `
       <div class="panel-head">
         <h2>开始观看</h2>
         <span class="badge muted">${esc(title)}</span>
+        ${watch.loading ? `<span class="badge">${(watch.progress || {}).done || 0}/${(watch.progress || {}).total || 0}</span>` : ""}
         <div class="spacer"></div>
         ${watch.selected ? `<button class="btn small" data-action="watch-back">返回来源</button>` : ""}
       </div>
-      ${body}
+      <div class="fade-in">${body}</div>
     `;
+    if (preserveScroll) modalBody.scrollTop = scrollTop;
   }
 
   function watchRoadsTemplate(roads) {
     if (!roads || !roads.length) return emptyState("◌", "该来源没有可用剧集");
-    return `<div class="roads">${roads.map((road, roadIndex) => `
-      <div>
-        <div class="road-head"><span class="badge">${esc(road.name)}</span><span class="muted small">${road.urls.length} 集</span></div>
+    const bestIndex = roads.reduce((best, road, index, list) => (road.urls.length > list[best].urls.length ? index : best), 0);
+    return `<div class="roads">${roads.map((road, roadIndex) => {
+      const hidden = roads.length > 1 && roadIndex !== bestIndex && !state.watch.showAllRoads;
+      return `
+      <div class="road-block ${hidden ? "hidden" : ""}" data-road-block="${roadIndex}">
+        <div class="road-head">
+          <label class="muted small" style="display:flex;align-items:center;gap:6px"><input type="checkbox" data-action="watch-select-road" data-road="${roadIndex}" /> 全选</label>
+          <span class="badge">${esc(road.name)}</span>
+          <span class="muted small">${road.urls.length} 集</span>
+          <div class="spacer"></div>
+          <button class="btn small" data-action="watch-download-selected" data-road="${roadIndex}">下载所选</button>
+          <button class="btn small primary" data-action="watch-download-all" data-road="${roadIndex}">下载全部</button>
+        </div>
         <div class="episode-list">${road.urls.map((url, index) => `
           <div class="episode-item">
-            <span class="episode-label">${esc(road.names[index] || `第${index + 1}集`)}</span>
+            <label class="episode-label" style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+              <input type="checkbox" class="watch-episode-check" data-road="${roadIndex}" data-index="${index}" />
+              <span>${esc(road.names[index] || `第${index + 1}集`)}</span>
+            </label>
             <div class="episode-actions">
               <button class="btn small" data-action="watch-play" data-road="${roadIndex}" data-index="${index}">播放</button>
               <button class="btn small primary" data-action="watch-episode" data-road="${roadIndex}" data-index="${index}">下载</button>
             </div>
           </div>`).join("")}</div>
-      </div>`).join("")}</div>`;
+      </div>`;
+    }).join("")}</div>`;
   }
 
   async function playWatchEpisode(roadIndex, episodeIndex) {
@@ -1556,20 +2391,35 @@
     let payload;
     try {
       payload = await api("/api/admin/kazumi/resolve", { method: "POST", body: { rule: item.rule, source }, admin: true });
+    } catch (err) {
+      showNotice("解析失败", err.message || String(err), "bad");
+      return;
     } finally {
       hideLoading();
     }
-    const opened = window.open(payload.url, "_blank");
-    if (opened) opened.opener = null;
-    if (!opened) {
-      modalBody.innerHTML = `
-        <div class="panel-head"><h2>${esc(title)}</h2></div>
-        <p class="muted small">浏览器拦截了新窗口，请点击下面的按钮打开${payload.media ? "视频" : "播放页"}。</p>
-        <div class="dialog-actions">
-          <a class="btn primary" href="${esc(payload.url)}" target="_blank" rel="noopener">打开${payload.media ? "视频" : "播放页"}</a>
-        </div>`;
-      openDialog(modal);
+    if (payload && payload.media && payload.url) {
+      try {
+        openPlayer(payload.url, title, true, null);
+        return;
+      } catch (_) {}
     }
+    const opened = payload && payload.url ? window.open(payload.url, "_blank", "noopener,noreferrer") : null;
+    if (opened) opened.opener = null;
+    if (payload && payload.url) {
+      if (!opened) {
+        modalBody.scrollTop = 0;
+        modalBody.innerHTML = `
+          <div class="panel-head"><h2>${esc(title)}</h2></div>
+          <p class="muted small">浏览器拦截了新窗口，请点击下面的按钮打开${payload.media ? "视频" : "播放页"}。</p>
+          <div class="dialog-actions">
+            <a class="btn primary" href="${esc(payload.url)}" target="_blank" rel="noopener">打开${payload.media ? "视频" : "播放页"}</a>
+            <button class="btn" data-action="watch-back">返回</button>
+          </div>`;
+        openDialog(modal);
+      }
+      return;
+    }
+    showNotice("无播放地址", "未解析到可用的视频地址，可返回列表尝试其他来源。", "warn");
   }
 
   async function loadWatchChapters(index) {
@@ -1592,6 +2442,10 @@
   }
 
   async function downloadWatchEpisode(roadIndex, episodeIndex) {
+    await queueWatchDownload(roadIndex, episodeIndex, { notify: true });
+  }
+
+  async function queueWatchDownload(roadIndex, episodeIndex, options = {}) {
     const item = state.watch.selected;
     if (!item) throw new Error("请先选择来源");
     const road = state.watch.roads[roadIndex];
@@ -1606,8 +2460,45 @@
       admin: true,
       body: { rule: item.rule, name: downloadName, bangumi_id: state.detail.subjectId || undefined, title, episode, source },
     });
-    toast(`已加入下载：${state.watch.name} 第 ${episode} 集（${item.rule}）`, "good");
-    showNotice("开始下载", `${downloadName} 第 ${episode} 集已加入下载队列（${item.rule}）。可在 Kazumi Files 查看进度。`, "good");
+    if (options.notify) {
+      toast(`已加入下载：${state.watch.name} 第 ${episode} 集（${item.rule}）`, "good");
+      showNotice("开始下载", `${downloadName} 第 ${episode} 集已加入下载队列（${item.rule}）。`, "good", { action: "go-files-tasks", label: "查看下载" });
+    }
+    return episode;
+  }
+
+  async function downloadWatchEpisodesBatch(roadIndex, all = false) {
+    const road = state.watch.roads[roadIndex];
+    if (!road) throw new Error("线路不存在");
+    let indexes = road.urls.map((_, index) => index);
+    if (!all) {
+      indexes = indexes.filter((index) => {
+        const box = modalBody.querySelector(`.watch-episode-check[data-road="${roadIndex}"][data-index="${index}"]`);
+        return box && box.checked;
+      });
+    }
+    if (!indexes.length) {
+      toast("请先选择要下载的剧集", "warn");
+      return;
+    }
+    showLoading(`正在加入 ${indexes.length} 个下载任务…`);
+    let ok = 0;
+    let failed = 0;
+    try {
+      for (const index of indexes) {
+        try {
+          await queueWatchDownload(roadIndex, index, { notify: false });
+          ok += 1;
+        } catch (_) {
+          failed += 1;
+        }
+      }
+    } finally {
+      hideLoading();
+    }
+    const msg = failed ? `已加入 ${ok} 个下载任务，${failed} 个失败` : `已加入 ${ok} 个下载任务`;
+    showNotice(failed ? "批量下载部分完成" : "批量下载已加入队列", msg, failed ? "warn" : "good", { action: "go-files-tasks", label: "查看下载" });
+    toast(msg, failed ? "warn" : "good");
   }
 
   function aliasOwnerName() {
@@ -1686,7 +2577,7 @@
     const value = settings || {};
     const mirrors = bangumiMirrorRows(state.mirrors, state.activeMirror);
     return `<div class="panel"><div class="panel-head"><h2>网络加速</h2></div>
-      <div class="grid" style="grid-template-columns:1fr 1fr;gap:12px">
+      <div class="grid form-grid">
         <label class="field"><span>番剧条目</span><select id="setting-bangumi">${modeOptions(value.bangumi_modes, value.bangumi_acceleration)}</select></label>
         <label class="field"><span>规则仓库镜像</span><select id="setting-rules">${modeOptions(value.rules_modes, value.rules_mirror)}</select></label>
         <label class="field"><span>图片加速</span><select id="setting-image">${modeOptions(value.image_modes, value.image_acceleration)}</select></label>
@@ -1776,19 +2667,31 @@
   // ---------- files ----------
   async function renderFiles(force = false) {
     setActions(`<button class="btn" data-action="refresh">刷新</button>`);
-    if (state.files.loaded && !force) renderFilesContent();
-    else view.innerHTML = loadingCards(3);
-    await loadFiles();
-    if (state.files.tab === "catalog" && !state.files.catalogLoaded) await loadRuleCatalog();
-    renderFilesContent();
-    state.timer = setInterval(async () => {
-      if (state.route !== "files") return;
-      try {
-        const payload = await api("/api/admin/kazumi/downloads", { admin: true });
-        state.files.tasks = payload.tasks || [];
-        if (state.files.tab === "tasks") renderFilesContent();
-      } catch (_) {}
-    }, 4000);
+    if (state.files.loaded) renderFilesContent();
+    if (!state.files.loaded || force) {
+      if (!state.files.loaded) view.innerHTML = loadingCards(3);
+      loadFiles().then(async () => {
+        if (state.route !== "files") return;
+        if (state.files.tab === "catalog" && !state.files.catalogLoaded) await loadRuleCatalog().catch(() => {});
+        if (state.route === "files") renderFilesContent();
+      }).catch((err) => {
+        if (state.route === "files" && !state.files.loaded) view.innerHTML = emptyState("!", err.message || String(err));
+      });
+    }
+    if (!state.timer) {
+      state.timer = setInterval(async () => {
+        if (state.route !== "files") return;
+        try {
+          const payload = await api("/api/admin/kazumi/downloads", { admin: true });
+          state.files.tasks = payload.tasks || [];
+          if (state.files.tab === "tasks") {
+            const body = document.getElementById("files-body");
+            if (body) body.innerHTML = tasksTemplate(state.files.tasks);
+            else renderFilesContent();
+          }
+        } catch (_) {}
+      }, 5000);
+    }
   }
 
   async function loadFiles() {
@@ -1820,12 +2723,12 @@
           <button class="chip ${tab === "rules" ? "active" : ""}" data-action="files-tab" data-tab="rules">规则文件</button>
         </div>
       </div>
-      ${tab === "tasks" ? tasksTemplate(tasks)
+      <div id="files-body">${tab === "tasks" ? tasksTemplate(tasks)
         : tab === "files" ? filesTemplate(files)
         : tab === "installed" ? installedRulesTemplate(rules)
         : tab === "catalog" ? catalogTemplate(catalog)
         : tab === "network" ? networkSettingsTemplate(settings)
-        : rulesTemplate(rules)}
+        : rulesTemplate(rules)}</div>
     `;
     if (tab === "catalog") bindCatalogFilter();
   }
@@ -1842,13 +2745,32 @@
 
   function tasksTemplate(tasks) {
     if (!tasks.length) return emptyState("⇣", "还没有 Kazumi 下载任务");
-    return `<div class="panel"><div class="list">${tasks.map((task) => `
-      <div class="row">
+    const failedCount = tasks.filter((task) => Number(task.status) === 3).length;
+    const actions = failedCount ? `
+      <div class="toolbar" style="margin-bottom:12px">
+        <button class="btn small" data-action="retry-failed-tasks">一键重试失败 (${failedCount})</button>
+        <button class="btn small danger" data-action="delete-failed-tasks">一键删除失败 (${failedCount})</button>
+      </div>` : "";
+    return `<div class="panel">${actions}<div class="list">${tasks.map((task) => {
+      const running = Number(task.status) === 1 || Number(task.status) === 0;
+      const speed = Number(task.speed) || 0;
+      const size = Number(task.size) || 0;
+      const progress = running ? `
+        <div style="margin-top:8px">
+          <div class="chips" style="gap:6px;margin-bottom:6px">
+            <span class="badge warn">${Number(task.status) === 1 ? "下载中" : "等待中"}</span>
+            <span class="badge muted">已下载 ${formatSize(size)}</span>
+            ${speed > 0 ? `<span class="badge good">${formatSize(speed)}/s</span>` : `<span class="badge muted">正在连接/解析…</span>`}
+          </div>
+          <div class="progress"><i class="indeterminate"></i></div>
+        </div>` : "";
+      return `
+      <div class="row" style="align-items:flex-start">
         <div class="grow">
           <div class="title">${esc(task.name)} <span class="badge muted">EP ${task.episode}</span></div>
-          <div class="sub">${esc(task.rule)} · 已下载 ${formatSize(task.size)}${Number(task.speed) > 0 ? ` · ${formatSize(task.speed)}/s` : ""} · ${esc(formatTime(task.updated_time))}</div>
-          ${Number(task.status) === 1 ? '<div class="progress"><i class="indeterminate"></i></div>' : ""}
-          ${task.error ? `<div class="sub" style="color:var(--bad)" title="${esc(task.error)}">${esc(task.error)}</div>` : ""}
+          <div class="sub">${esc(task.rule)}${!running ? ` · 已下载 ${formatSize(size)}` : ""}${speed > 0 && !running ? ` · ${formatSize(speed)}/s` : ""} · ${esc(formatTime(task.updated_time))}</div>
+          ${progress}
+          ${task.error ? `<div class="sub" style="color:var(--bad);margin-top:6px" title="${esc(task.error)}">${esc(task.error)}</div>` : ""}
         </div>
         <div class="actions">
           ${statusBadge(task.status)}
@@ -1857,7 +2779,8 @@
             ? `<button class="btn small danger" data-action="cancel-task" data-id="${task.id}">取消</button>`
             : `<button class="btn small" data-action="retry-task" data-id="${task.id}">重试</button><button class="btn small danger" data-action="delete-task" data-id="${task.id}">删除</button>`}
         </div>
-      </div>`).join("")}</div></div>`;
+      </div>`;
+    }).join("")}</div></div>`;
   }
 
   function filesTemplate(files) {
@@ -1904,6 +2827,88 @@
     renderFilesContent();
   }
 
+  async function retryFailedTasks() {
+    const failed = (state.files.tasks || []).filter((task) => Number(task.status) === 3);
+    if (!failed.length) return;
+    showLoading(`正在重试 ${failed.length} 个失败任务…`);
+    let ok = 0;
+    try {
+      for (const task of failed) {
+        try {
+          await api(`/api/admin/kazumi/downloads/${task.id}/retry`, { method: "POST", admin: true });
+          ok += 1;
+        } catch (_) {}
+      }
+    } finally {
+      hideLoading();
+    }
+    toast(`已重试 ${ok}/${failed.length} 个失败任务`, ok ? "good" : "warn");
+    await loadFiles();
+    renderFilesContent();
+  }
+
+  async function deleteFailedTasks() {
+    const failed = (state.files.tasks || []).filter((task) => Number(task.status) === 3);
+    if (!failed.length) return;
+    if (!confirm(`删除 ${failed.length} 个失败任务及其缓存文件？`)) return;
+    showLoading(`正在删除 ${failed.length} 个失败任务…`);
+    let ok = 0;
+    try {
+      for (const task of failed) {
+        try {
+          await api(`/api/admin/kazumi/downloads/${task.id}?delete=1`, { method: "DELETE", admin: true });
+          ok += 1;
+        } catch (_) {}
+      }
+    } finally {
+      hideLoading();
+    }
+    toast(`已删除 ${ok}/${failed.length} 个失败任务`, ok ? "good" : "warn");
+    await loadFiles();
+    renderFilesContent();
+  }
+
+  async function refreshKazumiBrowseCache() {
+    showLoading("正在启动 Kazumi 缓存更新…");
+    try {
+      const payload = await api("/api/admin/kazumi/browse/refresh", { method: "POST", admin: true });
+      toast(payload.message || "已开始更新 Kazumi 缓存", "good");
+      state.recommend.cache = {};
+      state.recommend.categoriesLoaded = false;
+      recommendCategoriesGeneration++;
+      detailMemory.clear();
+      // Keep showing the old cached content while the backend warms the new cache.
+      const reload = () => {
+        if (state.route === "timeline" || state.route === "recommend") renderRoute(false);
+      };
+      setTimeout(reload, 2500);
+      setTimeout(() => {
+        state.recommend.categoriesLoaded = false;
+        reload();
+      }, 9000);
+      setTimeout(() => {
+        state.recommend.categoriesLoaded = false;
+        reload();
+      }, 16000);
+    } finally {
+      hideLoading();
+    }
+  }
+
+  async function clearKazumiBrowseCacheAction() {
+    if (!confirm("清除 Kazumi 时间表/推荐的本地缓存？（不影响追番、订阅和下载）")) return;
+    await api("/api/admin/kazumi/browse/cache", { method: "DELETE", admin: true });
+    state.timeline.days = [];
+    state.timeline.day = "";
+    state.recommend.subjects = [];
+    state.recommend.cache = {};
+    state.recommend.categoriesLoaded = false;
+    recommendCategoriesGeneration++;
+    detailMemory.clear();
+    toast("Kazumi 缓存已清除", "good");
+    await renderRoute(true);
+  }
+
   async function deleteFile(path) {
     if (!confirm(`删除文件 ${path}？`)) return;
     await api(`/api/admin/kazumi/files?path=${encodeURIComponent(path)}`, { method: "DELETE", admin: true });
@@ -1944,16 +2949,28 @@
   async function renderSettings() {
     setActions("");
     view.innerHTML = `<div class="two-col">${loadingCards(2)}</div>`;
-    const [sync, webdavStatus, kazumiSettings, indexPayload] = await Promise.all([
+    Promise.allSettled([
       api("/api/admin/bangumi/sync", { admin: true }),
       api("/api/admin/webdav", { admin: true }),
       api("/api/admin/kazumi/settings", { admin: true }),
       api("/api/index/index"),
-    ]);
-    state.version = indexPayload.version || state.version;
-    state.mirrors = [...(kazumiSettings.bangumi_mirrors || [])];
-    state.activeMirror = kazumiSettings.bangumi_mirror || state.mirrors[0] || "";
-    view.innerHTML = `
+    ]).then(([syncRes, webdavRes, kazumiRes, indexRes]) => {
+      if (state.route !== "settings") return;
+      const sync = syncRes.status === "fulfilled" ? syncRes.value : {};
+      const webdavStatus = webdavRes.status === "fulfilled" ? webdavRes.value : {};
+      const kazumiSettings = kazumiRes.status === "fulfilled" ? kazumiRes.value : { bangumi_mirrors: [], bangumi_mirror: "" };
+      const indexPayload = indexRes.status === "fulfilled" ? indexRes.value : {};
+      state.version = indexPayload.version || state.version;
+      state.mirrors = [...(kazumiSettings.bangumi_mirrors || state.mirrors || [])];
+      state.activeMirror = kazumiSettings.bangumi_mirror || state.mirrors[0] || "";
+      view.innerHTML = renderSettingsHTML(sync, webdavStatus, kazumiSettings);
+    }).catch((err) => {
+      if (state.route === "settings") view.innerHTML = emptyState("!", err.message || String(err));
+    });
+  }
+
+  function renderSettingsHTML(sync = {}, webdavStatus = {}, kazumiSettings = {}) {
+    return `
       <div class="two-col">
         <div>
           <section class="panel">
@@ -1991,7 +3008,7 @@
             </div>
             <div data-settings-pane="webdav" class="${state.settingsTab === "webdav" ? "" : "hidden"}">
               <div class="panel-head"><h3>WebDAV 同步</h3>${webdavStatus.enabled ? '<span class="badge good">已启用</span>' : '<span class="badge muted">未启用</span>'}</div>
-              <div class="grid" style="grid-template-columns:1fr 1fr;gap:12px">
+              <div class="grid form-grid">
                 <label class="field" style="grid-column:1/-1"><span>WebDAV 地址</span><input id="webdav-url" type="text" value="${esc(webdavStatus.url || "")}" placeholder="https://dav.example.com/remote.php/dav/files/user" /></label>
                 <label class="field"><span>用户名</span><input id="webdav-user" type="text" value="${esc(webdavStatus.username || "")}" /></label>
                 <label class="field"><span>密码 / 应用授权码</span><input id="webdav-pass" type="password" placeholder="${webdavStatus.password_set ? "已设置，留空不修改" : "密码"}" /></label>
@@ -2033,6 +3050,7 @@
               <div class="row"><div class="grow"><div class="title">前端</div><div class="sub">内置 Web UI</div></div></div>
               <div class="row"><div class="grow"><div class="title">日历订阅</div><div class="sub"><a class="mono" href="/resource/calendar.ics" target="_blank">/resource/calendar.ics</a></div></div></div>
               <div class="row"><div class="grow"><div class="title">MCP</div><div class="sub"><span class="mono">/mcp</span> · <span class="mono">/mcp/sse</span></div></div></div>
+              <div class="row"><div class="grow"><div class="title">缓存</div><div class="sub">清除番剧详情/吐槽缓存，保留追番、订阅与下载信息</div></div><div class="actions"><button class="btn small" data-action="clear-detail-cache">清理缓存</button></div></div>
             </div>
           </section>
           <section class="panel">
@@ -2114,7 +3132,15 @@
     if (result) result.textContent = "正在测试…";
     try {
       const payload = await api("/api/admin/kazumi/test-mirror", { method: "POST", body: { url: value }, admin: true });
-      if (result) result.textContent = payload.ok ? `可用 · ${payload.latency_ms} ms` : `不可用：${payload.message}`;
+      if (result) {
+        if (payload.ok) {
+          result.textContent = payload.warning
+            ? `可用 · ${payload.latency_ms} ms（${payload.warning}）`
+            : `可用 · ${payload.latency_ms} ms`;
+        } else {
+          result.textContent = `不可用：${payload.message}`;
+        }
+      }
     } catch (err) {
       if (result) result.textContent = `测试失败：${err.message}`;
     }
@@ -2194,10 +3220,15 @@
     renderRoute(true);
   });
 
-  document.getElementById("menu-toggle").addEventListener("click", () => sidebar.classList.toggle("open"));
+  document.getElementById("menu-toggle").addEventListener("click", () => setSidebarOpen(!sidebar.classList.contains("open")));
+  const sidebarScrim = document.getElementById("sidebar-scrim");
+  if (sidebarScrim) sidebarScrim.addEventListener("click", () => setSidebarOpen(false));
+  window.addEventListener("resize", () => {
+    if (window.innerWidth > 900) setSidebarOpen(false);
+  });
   document.addEventListener("click", (event) => {
     if (window.innerWidth <= 900 && sidebar.classList.contains("open") && !sidebar.contains(event.target) && event.target.id !== "menu-toggle") {
-      sidebar.classList.remove("open");
+      setSidebarOpen(false);
     }
   });
 

@@ -967,18 +967,62 @@ func Search(keyword string, count int, regex *string, dupe bool, minEpisode, max
 	if err != nil {
 		return Result{Status: "error", Message: err.Error(), Data: map[string]any{"data": []model.Episode{}}}
 	}
-	var data []model.Episode
-	if tag {
-		sub := ""
-		if subtitle != nil {
-			sub = *subtitle
+
+	runSearch := func(q string) ([]model.Episode, error) {
+		if tag {
+			sub := ""
+			if subtitle != nil {
+				sub = *subtitle
+			}
+			return src.SearchByTag(q, sub, count)
 		}
-		data, err = src.SearchByTag(keyword, sub, count)
-	} else {
-		data, err = src.SearchByKeyword(keyword, count)
+		return src.SearchByKeyword(q, count)
 	}
-	if err != nil {
-		return Result{Status: "error", Message: err.Error(), Options: options}
+
+	var data []model.Episode
+	seenQuery := map[string]bool{}
+	var queries []string
+	addQuery := func(q string) {
+		q = strings.TrimSpace(q)
+		if q == "" || seenQuery[q] {
+			return
+		}
+		seenQuery[q] = true
+		queries = append(queries, q)
+	}
+	addQuery(keyword)
+	// Fallback variants for similar names (spaces/punctuation/season markers).
+	simplified := strings.NewReplacer("：", " ", ":", " ", "！", " ", "!", " ", "？", " ", "?", " ", "（", " ", "）", " ", "(", " ", ")", " ", "【", " ", "】", " ", "[", " ", "]", " ", "～", " ", "~", " ").Replace(keyword)
+	simplified = strings.Join(strings.Fields(simplified), " ")
+	addQuery(simplified)
+	if strings.ContainsAny(keyword, "第季篇") {
+		trimmed := strings.TrimSpace(strings.NewReplacer("第一季", "", "第二季", "", "第三季", "", "第四季", "", "第五季", "", "第六季", "", "Season 1", "", "Season 2", "", "Season 3", "", "Season 4", "", "Season 5", "", "Season 6", "").Replace(keyword))
+		addQuery(trimmed)
+	}
+	// Try without trailing season-like suffixes such as "S2"/"2nd Season".
+	addQuery(season.StripSeasonSuffix(keyword))
+
+	var lastErr error
+	for _, q := range queries {
+		result, searchErr := runSearch(q)
+		if searchErr != nil {
+			lastErr = searchErr
+			continue
+		}
+		if len(result) > 0 || q == keyword {
+			data = result
+			lastErr = nil
+			if q != keyword {
+				options["resolved_keyword"] = q
+			}
+			break
+		}
+	}
+	if lastErr != nil {
+		return Result{Status: "error", Message: lastErr.Error(), Options: options}
+	}
+	if data == nil {
+		data = []model.Episode{}
 	}
 	if regex != nil {
 		data = utils.EpisodeFilterRegex(data, *regex)
@@ -1119,7 +1163,9 @@ func downloadScriptEpisodes(following *db.Scripts, all []model.Episode) {
 	}
 }
 
-// Update checks subscriptions and downloads new episodes.
+// Update checks subscriptions and downloads new episodes. When withDownload is
+// enabled it also retries previously failed downloads and attempts to fetch all
+// currently available episodes that are not yet marked as downloaded.
 func Update(names []string, withDownload bool, notIgnore bool) error {
 	if err := ensureDB(); err != nil {
 		return err
@@ -1128,6 +1174,9 @@ func Update(names []string, withDownload bool, notIgnore bool) error {
 	logger.Info("updating subscriptions ...")
 	if withDownload {
 		downloadPreviousFailedDownloads()
+		// For "追更" behavior, do not ignore older rows so missing episodes can be
+		// discovered and downloaded when still available from the source.
+		notIgnore = true
 	}
 
 	var subscriptions []db.Followed

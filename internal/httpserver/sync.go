@@ -30,6 +30,12 @@ func adminBangumiRouter(w http.ResponseWriter, r *http.Request, path string) {
 		adminBangumiImport(w, r)
 	case r.Method == http.MethodPost && path == "cache":
 		adminBangumiCache(w, r)
+	case r.Method == http.MethodPost && path == "cache/clear":
+		if err := controllers.ClearBangumiDetailCache(); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "已清除番剧详情缓存（保留追番与下载信息）"})
 	case r.Method == http.MethodPost && path == "alias":
 		adminBangumiAlias(w, r)
 	case r.Method == http.MethodDelete && path == "alias":

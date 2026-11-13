@@ -28,6 +28,10 @@ func staticHandler(root string, fallbackIndex bool) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico", ".avif":
+			w.Header().Set("Cache-Control", "public, max-age=604800, stale-while-revalidate=86400")
+		}
 		files.ServeHTTP(w, r)
 	})
 }

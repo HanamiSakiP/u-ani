@@ -1,6 +1,6 @@
 # uani
 
-`uani` 是基于 [`github.com/BGmi/BGmi`](https://github.com/BGmi/BGmi) 的 Go CLI 重写版本，保持原有命令、配置格式、数据库结构和数据源行为，同时将工具名称改为 `uani`。
+`uani` 是 Go CLI 
 
 - 仓库：https://github.com/HanamiSakiP/u-ani
 - 当前版本：`1.0.0`
@@ -40,7 +40,7 @@ export PATH="$HOME/go/bin:$PATH"
 
 > 首次安装需要 Go 1.26+。使用 `@latest` 前请确认仓库已经推送了带 `go.mod` 的版本标签或分支。
 
-可选依赖：使用「用 Kazumi 下载番剧」功能时建议安装 `yt-dlp`（推荐）或 `ffmpeg`，程序会自动检测。
+可选依赖：使用「用 Kazumi 下载番剧」功能时建议安装 `yt-dlp`（推荐）或 `ffmpeg`，程序会自动检测。Python 不是运行依赖，仅在需要兼容旧版 BGmi Python 脚本时才会使用。
 
 ## 快速开始
 
@@ -82,10 +82,11 @@ export PATH="$HOME/go/bin:$PATH"
 UANI_PATH=/path/to/uani ./uani install --no-web
 ```
 
-配置文件位于 `${UANI_PATH}/config.toml`，SQLite 数据库位于 `${UANI_PATH}/bangumi.db`。启动时会自动创建：
+配置文件位于 `${UANI_PATH}/config.toml`，SQLite 数据库位于 `${UANI_PATH}/bangumi.db`。
+启动时会自动创建：
 
-- `${UANI_PATH}`
-- `save_path`、`tmp_path`、`log_path`、`script_path`、`tools_path`、`front_static_path`
+- `${UANI_PATH}` 及上述各目录
+- `save_path`、`cache_path`、`tmp_path`、`log_path`、`script_path`、`tools_path`、`front_static_path`
 - `db_path` 所在目录
 - 默认 `config.toml`（仅当文件不存在时）
 
@@ -281,12 +282,12 @@ uani kazumi download --rule AGE --name "葬送的芙莉莲" -e 1 --source "https
 
 ### 内置 Web 前端
 
-前端已重写为内置的轻量单页应用，启动 HTTP 服务后直接访问 `/` 即可，无需安装或构建：
+前端已重写为内置的轻量单页应用，启动 HTTP 服务后直接访问 `/` 即可，无需安装或构建。界面已适配手机端：侧边栏抽屉、顶部操作区自动换行、卡片两列布局，详情弹窗和设置表单在窄屏下自动收敛为单列，并处理了刘海屏安全区域。主要功能：
 
 - **追番**：按 Bangumi 收藏状态筛选（全部 / 在看 / 想看 / 搁置 / 看过 / 抛弃）；**已缓存** 只显示 Kazumi Files 中确实有已完成视频的番剧；卡片显示实际已下载集数，点击 **开始观看** 直接播放本地剧集，不再先搜索在线来源；支持名称搜索、更新检查、添加 / 删除订阅、**更新追番完整信息**（概述 / 角色 / 关联 / 制作人员 / 吐槽文字缓存，图片仅缓存封面、角色和关联）、**追番信息本地导入 / 导出**（导出包含已缓存的完整详情）；
 - **放送日历**：按星期展示当季番剧；
-- **Kazumi 时间表**：Bangumi 当季番剧放送时间表，可按星期切换，点击卡片查看详情；
-- **Kazumi 推荐**：与原版一致的「热门番组 + 日常 / 原创 / 校园 / 搞笑 / 奇幻 / 百合 / 恋爱 / 悬疑 / 热血 / 后宫 / 机战 / 轻改 / 偶像 / 治愈 / 异世界」分类；搜索会查询 Bangumi 全站，返回后立即预加载结果封面，在线搜索不可用时回退本地时间表匹配并提示；
+- **Kazumi 时间表**：Bangumi 当季番剧放送时间表，可按星期切换，点击卡片查看详情；切换星期直接使用本地缓存；
+- **Kazumi 推荐**：与原版一致的「热门番组 + 日常 / 原创 / 校园 / 搞笑 / 奇幻 / 百合 / 恋爱 / 悬疑 / 热血 / 后宫 / 机战 / 轻改 / 偶像 / 治愈 / 异世界」分类；搜索会查询 Bangumi 全站，返回后立即预加载结果封面，在线搜索不可用时回退本地时间表匹配并提示；**更新缓存**会同时预取所有分类，进入推荐页也会后台预热其余分类，之后切换分类无需等待网络；封面统一走图片代理并自动在加速模式与镜像之间快速切换；
 - **Kazumi Files**：下载任务、媒体文件、已安装规则、规则仓库、网络设置、规则文件查看 / 编辑；
 - **设置**：管理令牌、运行信息，以及合并为单一面板的「同步与镜像源」；面板内通过按钮切换 **Bangumi 同步 / WebDAV 同步 / 镜像源**，镜像可添加、删除、测试并切换当前使用。
 
@@ -298,7 +299,7 @@ uani kazumi download --rule AGE --name "葬送的芙莉莲" -e 1 --source "https
 - **关联**：关联条目，可继续点开查看；
 - **制作人员**：导演、脚本、原作等制作信息。
 
-「追番」和「放送日历」的卡片可以直接点开同一个详情弹窗；弹窗顶部提供「上一部 / 下一部」按钮，可在当前追番筛选结果或当前日历日内连续切换。本地视频播放器会显示「已缓存 N 集」，并列出可点击的本地剧集，点击即可切换播放。封面会下载到本地 `.cover`，详情数据首次读取后缓存到数据库，之后可离线预览。未自动匹配到 Bangumi 条目时，可在弹窗中手动输入 bgm.tv 条目 ID 或链接进行关联。已经订阅的番剧会在时间表 / 推荐 / 日历详情中自动识别，显示「订阅中」和「取消订阅」，不会再出现「添加订阅」。
+「追番」和「放送日历」的卡片可以直接点开同一个详情弹窗；弹窗顶部提供「上一部 / 下一部」按钮，可在当前追番筛选结果或当前日历日内连续切换。时间表 / 推荐详情会自动预取相邻条目，更新缓存后上一部 / 下一部无需等待网络。本地视频播放器会显示「已缓存 N 集」，并列出可点击的本地剧集，点击即可切换播放。封面会下载到本地 `.cover`，详情数据首次读取后缓存到数据库，之后可离线预览。未自动匹配到 Bangumi 条目时，可在弹窗中手动输入 bgm.tv 条目 ID 或链接进行关联。已经订阅的番剧会在时间表 / 推荐 / 日历详情中自动识别，显示「订阅中」和「取消订阅」，不会再出现「添加订阅」。
 
 详情弹窗中的 Bangumi 收藏按钮支持切换 **想看 / 看过 / 在看 / 搁置 / 抛弃**，与 Bangumi 官方收藏状态一致；需要先在设置中连接 Bangumi Access Token。
 
@@ -366,9 +367,6 @@ bangumi_mirrors = [
 
 RPC 地址、端口、用户名、密码等配置项与原版一致。
 
-## Python 脚本兼容
-
-原有 BGmi Python 脚本仍然可用。脚本放在 `${UANI_PATH}/scripts/*.py`，由系统 Python 执行。Go 程序内置了 `bgmi`、`bgmi.script`、`bgmi.utils`、`bgmi.config`、`bgmi.lib.*`、`bgmi.website.*` 的兼容 shim，因此脚本可以继续使用：
 
 ```python
 from bgmi.script import ScriptBase
@@ -419,17 +417,18 @@ uani config set http disable_mcp --value true
 uani cover
 ```
 
-封面保存在 `save_path/.cover/`，Web 前端通过 `/bangumi/.cover/...` 访问。
+封面保存在 `cache_path/covers/`，Web 前端通过 `/covers/...` 访问（旧路径 `/bangumi/.cover/...` 仍兼容）。
 
 - Web API：`/api/index/{index|old}`、`/api/player/<bangumi_id>`、`/api/calendar`
-- Kazumi 浏览 API：`/api/kazumi/timeline`、`/api/kazumi/recommend`、`/api/kazumi/subject/<id>`
+- Kazumi 浏览 API：`/api/kazumi/timeline`、`/api/kazumi/recommend`、`/api/kazumi/recommend/all`、`/api/kazumi/subject/<id>`
 - 番剧详情 API：`/api/kazumi/lookup`、`/api/kazumi/subject/<id>/{characters|staff|relations|comments}`
 - 收藏状态 API：`GET /api/admin/bangumi/collection/<id>`、`POST /api/admin/bangumi/collection`、`POST /api/admin/bangumi/link`
 - 管理 API：`/api/admin/*`，需要 `Authorization: Bearer <admin_token>`
 - 日历订阅：`/resource/calendar.ics`
 - MCP：`POST /mcp`（Streamable HTTP）、`GET /mcp/sse`、`POST /mcp/messages`
 - 内置 Web UI：`/`（随二进制发布，无需安装）
-- 媒体文件：`/bangumi/` 提供 `save_path`，`/kazumi-files/` 提供 Kazumi 下载目录
+- 媒体文件：`/bangumi/` 提供 `save_path`，`/kazumi-files/` 提供 Kazumi 下载目录，`/covers/` 提供封面缓存
+- Web 前端静态资源启用 gzip 压缩与长期缓存（HTML 入口保持 no-cache），API 响应不缓存以保证数据实时性
 
 管理 API 和 MCP 使用配置中的 `[http] admin_token`：
 
@@ -515,7 +514,7 @@ go test ./...
 go vet ./...
 ```
 
-测试覆盖配置自动初始化、剧集/季度解析、数据源 HTML/XML 解析、控制器、数据库迁移、路径格式化、Kazumi 规则仓库/加速、Kazumi XPath/API 规则解析、Bangumi 剧情详情/角色/制作人员/关联缓存、收藏状态切换、内置 Web UI、Bangumi 追番同步，以及 Python 脚本兼容。
+测试覆盖配置自动初始化、剧集/季度解析、数据源 HTML/XML 解析、控制器、数据库迁移、路径格式化、Kazumi 规则仓库/加速、Kazumi XPath/API 规则解析、Bangumi 剧情详情/角色/制作人员/关联缓存、收藏状态切换、内置 Web UI、Bangumi 追番同步，以及可选的 Python 脚本兼容（无 Python 时自动跳过）。
 
 ## 与上游的说明
 

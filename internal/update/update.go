@@ -14,6 +14,7 @@ import (
 	"github.com/HanamiSakiP/u-ani/internal/logger"
 	"github.com/HanamiSakiP/u-ani/internal/season"
 	"github.com/HanamiSakiP/u-ani/internal/source"
+	"github.com/HanamiSakiP/u-ani/internal/utils"
 )
 
 func oldVersionFile() string {
@@ -25,11 +26,14 @@ func CreateDir() error {
 	paths := []string{
 		config.UANIHome,
 		config.Cfg.SavePath,
+		config.Cfg.CachePath,
 		config.Cfg.TmpPath,
 		config.Cfg.LogPath,
 		config.Cfg.ScriptPath,
 		config.Cfg.ToolsPath,
 		config.Cfg.FrontStaticPath,
+		filepath.Join(config.Cfg.CachePath, "covers"),
+		filepath.Join(config.Cfg.CachePath, "kazumi"),
 	}
 	for _, p := range paths {
 		if p == "" {
@@ -314,11 +318,13 @@ func migrateFromV4(dbPath string) {
 	}
 
 	oldCover := filepath.Join(config.Cfg.SavePath, "cover")
-	newCover := filepath.Join(config.Cfg.SavePath, ".cover")
+	newCover := utils.CoverCacheDir()
 	if info, err := os.Stat(oldCover); err == nil && info.IsDir() {
 		if _, err := os.Stat(newCover); os.IsNotExist(err) {
-			if err := os.Rename(oldCover, newCover); err == nil {
-				logger.Info("Renamed cover directory: %s -> %s", oldCover, newCover)
+			if err := os.MkdirAll(filepath.Dir(newCover), 0o755); err == nil {
+				if err := os.Rename(oldCover, newCover); err == nil {
+					logger.Info("Renamed cover directory: %s -> %s", oldCover, newCover)
+				}
 			}
 		}
 	}

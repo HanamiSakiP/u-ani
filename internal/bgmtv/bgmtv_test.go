@@ -406,3 +406,73 @@ func TestSearchSubjects(t *testing.T) {
 		t.Fatalf("subjects = %#v", subjects)
 	}
 }
+
+func TestDecodeCommentPageShapes(t *testing.T) {
+	cases := map[string]string{
+		"list":     `{"list":[{"comment":"好看","updatedAt":1700000000}],"total":1}`,
+		"data":     `{"data":[{"comment":"好看"}],"total":1}`,
+		"bare":     `[{"comment":"好看","updated":1700000000}]`,
+		"result":   `{"result":{"comments":[{"content":"好看","updated_at":1700000000}]}}`,
+		"envelope": `{"code":200,"result":{"list":[{"comment":"好看"}]}}`,
+	}
+	for name, raw := range cases {
+		page, err := decodeCommentPage([]byte(raw))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(page.List) != 1 || page.List[0].Comment != "好看" {
+			t.Fatalf("%s: page = %#v", name, page)
+		}
+	}
+	if _, err := decodeCommentPage([]byte(`{"code":500,"error":"boom"}`)); err == nil {
+		t.Fatal("expected error for rejected response")
+	}
+}
+
+func TestImagesUnmarshalShapes(t *testing.T) {
+	cases := map[string]string{
+		"object": `{"large":"https://lain.bgm.tv/l.jpg","medium":"https://lain.bgm.tv/m.jpg"}`,
+		"string": `"https://lain.bgm.tv/s.jpg"`,
+		"alias":  `{"image":"https://lain.bgm.tv/i.jpg"}`,
+	}
+	for name, raw := range cases {
+		var images Images
+		if err := json.Unmarshal([]byte(raw), &images); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if images.Large == "" {
+			t.Fatalf("%s: images = %#v", name, images)
+		}
+	}
+}
+
+func TestSearchSubjectsPrefersResultsWithCovers(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/search/subject/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"list": []map[string]any{{"id": 1, "name": "No Cover"}},
+			})
+		case r.URL.Path == "/v0/search/subjects":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{{
+					"id": 2, "name": "With Cover",
+					"images": map[string]string{"large": "https://lain.bgm.tv/c.jpg"},
+				}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	oldBase := APIBase
+	APIBase = server.URL
+	defer func() { APIBase = oldBase }()
+	subjects, err := SearchSubjects("test", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) != 1 || subjects[0].CoverURL() == "" {
+		t.Fatalf("subjects = %#v", subjects)
+	}
+}

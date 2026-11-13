@@ -52,7 +52,7 @@ func handleKazumiSources(w http.ResponseWriter, r *http.Request) {
 	results := make([]result, 0, len(rules))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 4)
+	sem := make(chan struct{}, 6)
 	for _, installed := range rules {
 		installed := installed
 		wg.Add(1)

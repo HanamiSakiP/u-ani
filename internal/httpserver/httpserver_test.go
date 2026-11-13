@@ -998,3 +998,101 @@ func TestHandlerOptionsDisableWebAndMCP(t *testing.T) {
 		t.Fatalf("/ status = %d, want 200", resp.StatusCode)
 	}
 }
+
+func TestKazumiRecommendCategoriesFromDiskCache(t *testing.T) {
+	setupHTTPTest(t)
+	recommendMu.Lock()
+	recommendCache = map[string]recommendEntry{}
+	recommendMu.Unlock()
+	key := fmt.Sprintf("%s|%s|%d|%d", "", "日常", 24, 0)
+	items := []map[string]any{{"id": 201, "name": "Daily", "name_cn": "日常番"}}
+	saveRecommendDiskCache(key, items)
+
+	server := httptest.NewServer(Handler())
+	defer server.Close()
+	resp := request(t, server, http.MethodGet, "/api/kazumi/recommend/all", nil, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body := decodeJSON(t, resp)
+	categories, _ := body["categories"].(map[string]any)
+	list, _ := categories["日常"].([]any)
+	if len(list) != 1 || list[0].(map[string]any)["name_cn"] != "日常番" {
+		t.Fatalf("categories = %#v", categories)
+	}
+}
+
+func TestNormalizeCommentsPayloadLegacyShapes(t *testing.T) {
+	payloads := []any{
+		[]any{map[string]any{"content": "好看", "createdAt": float64(1700000000)}},
+		[]map[string]any{{"content": "好看", "updated": float64(1700000000)}},
+		map[string]any{"list": []any{map[string]any{"content": "好看", "created_at": float64(1700000000)}}},
+	}
+	for _, payload := range payloads {
+		normalized, ok := normalizeCommentsPayload(payload).(map[string]any)
+		if !ok {
+			t.Fatalf("normalized = %#v", normalized)
+		}
+		items, _ := normalized["items"].([]any)
+		if len(items) != 1 {
+			t.Fatalf("items = %#v", normalized["items"])
+		}
+		item := items[0].(map[string]any)
+		if item["comment"] != "好看" {
+			t.Fatalf("comment = %#v", item)
+		}
+		if number, _ := item["updated_at"].(float64); number != 1700000000 {
+			t.Fatalf("updated_at = %#v", item["updated_at"])
+		}
+	}
+}
+
+func TestKazumiCommentsRefetchesEmptyCache(t *testing.T) {
+	setupHTTPTest(t)
+	if err := db.Conn.SaveBangumiCache(&db.BangumiCache{
+		SubjectID: 101,
+		Comments:  `{"items":[],"total":0}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/comments/101" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"total": 1, "list": []map[string]any{{
+			"user": map[string]any{"id": 4, "username": "u", "nickname": "用户", "avatar": map[string]string{"large": "https://lain.bgm.tv/u.jpg"}},
+			"rate": 8, "comment": "好看", "updatedAt": 1700000000,
+		}}})
+	}))
+	defer apiServer.Close()
+	oldBase := bgmtv.APIBase
+	bgmtv.APIBase = apiServer.URL
+	defer func() { bgmtv.APIBase = oldBase }()
+
+	server := httptest.NewServer(Handler())
+	defer server.Close()
+	resp := request(t, server, http.MethodGet, "/api/kazumi/subject/101/comments", nil, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body := decodeJSON(t, resp)
+	items, _ := body["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("items = %#v", body["items"])
+	}
+	item := items[0].(map[string]any)
+	if item["comment"] != "好看" {
+		t.Fatalf("comment = %#v", item)
+	}
+}
+
+func TestCardCoverPrefersSmallerThumbnail(t *testing.T) {
+	images := bgmtv.Images{Large: "large", Common: "common", Medium: "medium", Small: "small"}
+	if got := cardCover(images); got != "common" {
+		t.Fatalf("cardCover = %q, want common", got)
+	}
+	if got := cardCover(bgmtv.Images{Large: "large"}); got != "large" {
+		t.Fatalf("cardCover fallback = %q, want large", got)
+	}
+}

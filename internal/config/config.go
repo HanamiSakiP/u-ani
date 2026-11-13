@@ -121,6 +121,7 @@ type Config struct {
 	Proxy   string `toml:"proxy" json:"proxy"`
 
 	SavePath        string `toml:"save_path" json:"save_path"`
+	CachePath       string `toml:"cache_path" json:"cache_path"`
 	FrontStaticPath string `toml:"front_static_path" json:"front_static_path"`
 	DBPath          string `toml:"db_path" json:"db_path"`
 	ScriptPath      string `toml:"script_path" json:"script_path"`
@@ -242,6 +243,7 @@ func defaultConfig() Config {
 		LogPath:          env("UANI_LOG_PATH", filepath.Join(home, "log")),
 		Proxy:            env("UANI_PROXY", ""),
 		SavePath:         env("UANI_SAVE_PATH", filepath.Join(home, "bangumi")),
+		CachePath:        env("UANI_CACHE_PATH", filepath.Join(home, "cache")),
 		FrontStaticPath:  env("UANI_FRONT_STATIC_PATH", filepath.Join(home, "front_static")),
 		DBPath:           env("UANI_DB_PATH", filepath.Join(home, "bangumi.db")),
 		ScriptPath:       env("UANI_SCRIPT_PATH", filepath.Join(home, "scripts")),
@@ -361,12 +363,49 @@ func Load() error {
 	if migrateBangumiMirrors() {
 		changed = true
 	}
+	if Cfg.CachePath == "" {
+		Cfg.CachePath = filepath.Join(UANIHome, "cache")
+		changed = true
+	}
 	if changed {
 		if err := Cfg.Save(); err != nil {
 			return err
 		}
 	}
-	return EnsureDirs()
+	if err := EnsureDirs(); err != nil {
+		return err
+	}
+	migrateLegacyCoverDir()
+	return nil
+}
+
+// migrateLegacyCoverDir moves covers from the historical save_path/.cover
+// location into the new cache_path/covers directory.
+func migrateLegacyCoverDir() {
+	if Cfg.CachePath == "" || Cfg.SavePath == "" {
+		return
+	}
+	old := filepath.Join(Cfg.SavePath, ".cover")
+	if _, err := os.Stat(old); err != nil {
+		return
+	}
+	newDir := filepath.Join(Cfg.CachePath, "covers")
+	if err := os.MkdirAll(newDir, 0o755); err != nil {
+		return
+	}
+	entries, err := os.ReadDir(old)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		src := filepath.Join(old, entry.Name())
+		dst := filepath.Join(newDir, entry.Name())
+		if _, err := os.Stat(dst); err == nil {
+			continue
+		}
+		_ = os.Rename(src, dst)
+	}
+	_ = os.Remove(old)
 }
 
 func migrateWebDAVDirection() bool {
@@ -404,6 +443,7 @@ func EnsureDirs() error {
 	paths := []string{
 		UANIHome,
 		Cfg.SavePath,
+		Cfg.CachePath,
 		Cfg.TmpPath,
 		Cfg.LogPath,
 		Cfg.ScriptPath,
@@ -411,6 +451,8 @@ func EnsureDirs() error {
 		Cfg.FrontStaticPath,
 		filepath.Join(UANIHome, "kazumi", "rules"),
 		filepath.Join(Cfg.SavePath, "kazumi"),
+		filepath.Join(Cfg.CachePath, "covers"),
+		filepath.Join(Cfg.CachePath, "kazumi"),
 	}
 	if Cfg.DBPath != "" {
 		paths = append(paths, filepath.Dir(Cfg.DBPath))

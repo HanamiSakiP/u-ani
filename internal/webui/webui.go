@@ -27,9 +27,6 @@ func Handler() http.Handler {
 			return
 		}
 		if info, err := fs.Stat(sub, clean); err == nil && !info.IsDir() {
-			if strings.HasPrefix(clean, "assets/") {
-				w.Header().Set("Cache-Control", "no-cache")
-			}
 			files.ServeHTTP(w, r)
 			return
 		}

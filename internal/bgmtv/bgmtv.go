@@ -39,6 +39,46 @@ type Images struct {
 	Grid   string `json:"grid"`
 }
 
+// UnmarshalJSON accepts both the standard image object and the older/string
+// shapes used by some mirrors so search results always keep their covers.
+func (images *Images) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	if data[0] == '"' {
+		var value string
+		if err := json.Unmarshal(data, &value); err != nil {
+			return err
+		}
+		images.Large = value
+		return nil
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	pick := func(keys ...string) string {
+		for _, key := range keys {
+			value, ok := raw[key]
+			if !ok {
+				continue
+			}
+			var text string
+			if err := json.Unmarshal(value, &text); err == nil && text != "" {
+				return text
+			}
+		}
+		return ""
+	}
+	images.Large = pick("large", "Large", "original", "image", "cover", "url")
+	images.Common = pick("common", "Common")
+	images.Medium = pick("medium", "Medium")
+	images.Small = pick("small", "Small")
+	images.Grid = pick("grid", "Grid", "thumbnail")
+	return nil
+}
+
 // Infobox is one infobox entry. Its value can be a string, an object or a
 // list of either, so it is decoded lazily.
 type Infobox struct {
@@ -99,10 +139,10 @@ type Relation struct {
 
 // CommentUser is the author of a subject comment.
 type CommentUser struct {
-	ID       int    `json:"id"`
-	Username string `json:"username"`
-	Nickname string `json:"nickname"`
-	Avatar   Images `json:"avatar"`
+	ID       int             `json:"id"`
+	Username string          `json:"username"`
+	Nickname string          `json:"nickname"`
+	Avatar   json.RawMessage `json:"avatar"`
 }
 
 // Comment is one subject comment ("吐槽").
@@ -110,7 +150,10 @@ type Comment struct {
 	User      CommentUser `json:"user"`
 	Rate      int         `json:"rate"`
 	Comment   string      `json:"comment"`
+	Content   string      `json:"content"`
 	UpdatedAt int64       `json:"updatedAt"`
+	Updated   int64       `json:"updated"`
+	CreatedAt int64       `json:"createdAt"`
 }
 
 // CommentPage is a page of subject comments.
@@ -685,8 +728,8 @@ func FetchRelations(id int) ([]Relation, error) {
 }
 
 // FetchComments returns the first page of subject comments. The official
-// next API and every configured mirror are queried concurrently so that one
-// slow or signature-protected endpoint cannot block the others.
+// next API and configured mirrors are queried concurrently so one slow or
+// incompatible endpoint cannot block the others.
 func FetchComments(id, offset, limit int) (*CommentPage, error) {
 	if offset < 0 {
 		offset = 0
@@ -694,20 +737,48 @@ func FetchComments(id, offset, limit int) (*CommentPage, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
-	candidates := []string{commentsAPIURL(id, offset, limit)}
-	if isPublicAPIBase() {
-		for _, mirror := range kazumi.BangumiMirrors() {
-			candidates = append(candidates, fmt.Sprintf("%s/p1/subjects/%d/comments?limit=%d&offset=%d", strings.TrimRight(mirror, "/"), id, limit, offset))
+	candidates := []string{}
+	add := func(rawURL string) {
+		rawURL = strings.TrimSpace(rawURL)
+		if rawURL == "" {
+			return
 		}
+		candidates = append(candidates, rawURL)
+	}
+	if isPublicAPIBase() {
+		active := strings.TrimRight(kazumi.ActiveBangumiMirror(), "/")
+		if active != "" {
+			add(fmt.Sprintf("%s/p1/subjects/%d/comments?limit=%d&offset=%d", active, id, limit, offset))
+			add(fmt.Sprintf("%s/comments/%d?limit=%d&offset=%d", active, id, limit, offset))
+		}
+		add(fmt.Sprintf("https://next.bgm.tv/p1/subjects/%d/comments?limit=%d&offset=%d", id, limit, offset))
+		add(fmt.Sprintf("https://api.bgm.tv/comments/%d?limit=%d&offset=%d", id, limit, offset))
+		for _, mirror := range kazumi.BangumiMirrors() {
+			mirror = strings.TrimRight(mirror, "/")
+			add(fmt.Sprintf("%s/p1/subjects/%d/comments?limit=%d&offset=%d", mirror, id, limit, offset))
+			add(fmt.Sprintf("%s/comments/%d?limit=%d&offset=%d", mirror, id, limit, offset))
+		}
+		for _, mirror := range kazumi.BangumiSearchMirrors() {
+			mirror = strings.TrimRight(mirror, "/")
+			add(fmt.Sprintf("%s/p1/subjects/%d/comments?limit=%d&offset=%d", mirror, id, limit, offset))
+			add(fmt.Sprintf("%s/comments/%d?limit=%d&offset=%d", mirror, id, limit, offset))
+		}
+	} else {
+		add(commentsAPIURL(id, offset, limit))
+		add(fmt.Sprintf("%s/p1/subjects/%d/comments?limit=%d&offset=%d", strings.TrimRight(APIBase, "/"), id, limit, offset))
+		add(fmt.Sprintf("%s/comments/%d?limit=%d&offset=%d", strings.TrimRight(APIBase, "/"), id, limit, offset))
 	}
 	seen := map[string]bool{}
 	urls := make([]string, 0, len(candidates))
 	for _, rawURL := range candidates {
-		if rawURL == "" || seen[rawURL] {
+		if seen[rawURL] {
 			continue
 		}
 		seen[rawURL] = true
 		urls = append(urls, rawURL)
+	}
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("Bangumi comments endpoint is not configured")
 	}
 	type result struct {
 		page *CommentPage
@@ -717,59 +788,152 @@ func FetchComments(id, offset, limit int) (*CommentPage, error) {
 	for _, rawURL := range urls {
 		rawURL := rawURL
 		go func() {
-			var payload struct {
-				List  []Comment `json:"list"`
-				Data  []Comment `json:"data"`
-				Total *int      `json:"total"`
-				Code  int       `json:"code"`
-				Error string    `json:"error"`
+			timeout := 5 * time.Second
+			if strings.Contains(rawURL, "next.bgm.tv") || strings.Contains(rawURL, "api.bgm.tv") {
+				timeout = 6500 * time.Millisecond
 			}
-			if err := getJSONDirectTimeout(rawURL, &payload, 5*time.Second); err != nil {
+			var raw json.RawMessage
+			if err := getJSONDirectTimeout(rawURL, &raw, timeout); err != nil {
 				results <- result{err: err}
 				return
 			}
-			if payload.Code >= 400 || payload.Error != "" {
-				results <- result{err: fmt.Errorf("comments endpoint rejected the request: %s", strings.TrimSpace(payload.Error))}
+			page, err := decodeCommentPage(raw)
+			if err != nil {
+				results <- result{err: err}
 				return
 			}
-			list := payload.List
-			if len(list) == 0 {
-				list = payload.Data
-			}
-			if payload.List == nil && payload.Data == nil && payload.Total == nil {
-				results <- result{err: fmt.Errorf("comments endpoint returned no comment data")}
-				return
-			}
-			total := 0
-			if payload.Total != nil {
-				total = *payload.Total
-			}
-			results <- result{page: &CommentPage{List: list, Total: total}}
+			results <- result{page: page}
 		}()
 	}
-	timer := time.NewTimer(7 * time.Second)
+	timer := time.NewTimer(10 * time.Second)
 	defer timer.Stop()
 	var lastErr error
+	var emptyPage *CommentPage
 	for range urls {
 		select {
 		case item := <-results:
-			if item.err == nil && item.page != nil {
-				return item.page, nil
-			}
 			if item.err != nil {
 				lastErr = item.err
+				continue
+			}
+			if item.page == nil {
+				continue
+			}
+			// Some mirrors answer unsupported comment endpoints with an
+			// empty 200 response. Keep waiting for a candidate that actually
+			// has comments and only fall back to the empty page at the end.
+			if len(item.page.List) > 0 {
+				return item.page, nil
+			}
+			if emptyPage == nil {
+				emptyPage = item.page
 			}
 		case <-timer.C:
+			if emptyPage != nil {
+				return emptyPage, nil
+			}
 			if lastErr == nil {
 				lastErr = fmt.Errorf("Bangumi comments request timed out")
 			}
 			return nil, lastErr
 		}
 	}
+	if emptyPage != nil {
+		return emptyPage, nil
+	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("Bangumi comments returned no data")
 	}
 	return nil, lastErr
+}
+
+// decodeCommentPage accepts the shapes returned by the official next API and
+// the various mirrors. Some endpoints wrap the list in an envelope, while
+// older APIs return a bare array.
+func decodeCommentPage(raw json.RawMessage) (*CommentPage, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, fmt.Errorf("comments endpoint returned no comment data")
+	}
+	var list []Comment
+	if err := json.Unmarshal(raw, &list); err == nil {
+		normalizeComments(list)
+		return &CommentPage{List: list, Total: len(list)}, nil
+	}
+	var payload struct {
+		List     []Comment `json:"list"`
+		Data     []Comment `json:"data"`
+		Comments []Comment `json:"comments"`
+		Result   *struct {
+			List     []Comment `json:"list"`
+			Data     []Comment `json:"data"`
+			Comments []Comment `json:"comments"`
+			Total    *int      `json:"total"`
+		} `json:"result"`
+		Total *int   `json:"total"`
+		Code  int    `json:"code"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, err
+	}
+	if payload.Code >= 400 || payload.Error != "" {
+		msg := strings.TrimSpace(payload.Error)
+		if msg == "" {
+			msg = "request rejected"
+		}
+		return nil, fmt.Errorf("comments endpoint rejected the request: %s", msg)
+	}
+	list = firstCommentList(payload.List, payload.Data, payload.Comments)
+	total := payload.Total
+	if payload.Result != nil {
+		if len(list) == 0 {
+			list = firstCommentList(payload.Result.List, payload.Result.Data, payload.Result.Comments)
+		}
+		if total == nil {
+			total = payload.Result.Total
+		}
+	}
+	// At least one recognized field must be present; otherwise this is an
+	// unrelated JSON document (for example an HTML error rendered by a mirror).
+	if payload.List == nil && payload.Data == nil && payload.Comments == nil && payload.Total == nil && payload.Result == nil {
+		return nil, fmt.Errorf("comments endpoint returned no comment data")
+	}
+	normalizeComments(list)
+	out := &CommentPage{List: list}
+	if total != nil {
+		out.Total = *total
+	}
+	return out, nil
+}
+
+func firstCommentList(lists ...[]Comment) []Comment {
+	for _, list := range lists {
+		if len(list) > 0 {
+			return list
+		}
+	}
+	for _, list := range lists {
+		if list != nil {
+			return list
+		}
+	}
+	return nil
+}
+
+func normalizeComments(list []Comment) {
+	for i := range list {
+		if list[i].Comment == "" {
+			list[i].Comment = list[i].Content
+		}
+		if list[i].UpdatedAt == 0 {
+			if list[i].Updated != 0 {
+				list[i].UpdatedAt = list[i].Updated
+			} else {
+				list[i].UpdatedAt = list[i].CreatedAt
+			}
+		}
+	}
 }
 
 // GetCollection returns the current user's collection type for one subject.
@@ -799,7 +963,7 @@ func commentsAPIURL(id, offset, limit int) string {
 }
 
 func getJSONDirect(rawURL string, out any) error {
-	return getJSONDirectTimeout(rawURL, out, 8*time.Second)
+	return getJSONDirectTimeout(rawURL, out, 4500*time.Millisecond)
 }
 
 func getJSONDirectTimeout(rawURL string, out any, timeout time.Duration) error {
@@ -1141,7 +1305,7 @@ func postJSONAuth(url, token string, payload any) error {
 }
 
 func doJSON(method, url string, body []byte, token string, out any) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 	mode, _ := kazumi.NormalizeBangumiAcceleration(config.Cfg.Kazumi.BangumiAcceleration)
 	target := kazumi.ApplyBangumiURL(url, mode)
@@ -1209,17 +1373,29 @@ func SearchSubjects(keyword string, limit int) ([]Subject, error) {
 	}
 	type searchFunc func() ([]Subject, error)
 	var jobs []searchFunc
-	jobs = append(jobs, func() ([]Subject, error) { return searchSubjectsLegacy(base, keyword, limit) })
+	seenJob := map[string]bool{}
+	addJob := func(key string, fn searchFunc) {
+		if seenJob[key] {
+			return
+		}
+		seenJob[key] = true
+		jobs = append(jobs, fn)
+	}
 	if public {
 		for _, mirror := range kazumi.BangumiSearchMirrors() {
-			mirror := mirror
-			jobs = append(jobs,
-				func() ([]Subject, error) { return searchSubjectsLegacy(mirror, keyword, limit) },
-				func() ([]Subject, error) { return searchSubjectsV0(mirror, keyword, limit) },
-			)
+			mirror := strings.TrimRight(mirror, "/")
+			if mirror == "" {
+				continue
+			}
+			addJob("v0:"+mirror, func() ([]Subject, error) { return searchSubjectsV0(mirror, keyword, limit) })
+			addJob("legacy:"+mirror, func() ([]Subject, error) { return searchSubjectsLegacy(mirror, keyword, limit) })
 		}
 	} else {
-		jobs = append(jobs, func() ([]Subject, error) { return searchSubjectsV0(base, keyword, limit) })
+		addJob("v0:"+base, func() ([]Subject, error) { return searchSubjectsV0(base, keyword, limit) })
+		addJob("legacy:"+base, func() ([]Subject, error) { return searchSubjectsLegacy(base, keyword, limit) })
+	}
+	if len(jobs) == 0 {
+		return nil, fmt.Errorf("Bangumi search endpoint is not configured")
 	}
 	type result struct {
 		subjects []Subject
@@ -1233,29 +1409,54 @@ func SearchSubjects(keyword string, limit int) ([]Subject, error) {
 			results <- result{subjects: subjects, err: err}
 		}()
 	}
-	timer := time.NewTimer(10 * time.Second)
+	timer := time.NewTimer(7 * time.Second)
 	defer timer.Stop()
 	var lastErr error
+	var fallback []Subject
 	for range jobs {
 		select {
 		case item := <-results:
 			if item.err == nil && len(item.subjects) > 0 {
-				return item.subjects, nil
+				// A fast mirror may return names without covers. Keep waiting
+				// briefly for a source that includes images so search result
+				// cards render correctly.
+				if subjectsHaveCovers(item.subjects) {
+					return item.subjects, nil
+				}
+				if fallback == nil {
+					fallback = item.subjects
+				}
+				continue
 			}
 			if item.err != nil {
 				lastErr = item.err
 			}
 		case <-timer.C:
+			if fallback != nil {
+				return fallback, nil
+			}
 			if lastErr == nil {
 				lastErr = fmt.Errorf("Bangumi search timed out")
 			}
 			return nil, lastErr
 		}
 	}
+	if fallback != nil {
+		return fallback, nil
+	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("Bangumi search returned no results")
 	}
 	return nil, lastErr
+}
+
+func subjectsHaveCovers(subjects []Subject) bool {
+	for i := range subjects {
+		if subjects[i].CoverURL() != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func searchSubjectsLegacy(base, keyword string, limit int) ([]Subject, error) {
@@ -1311,7 +1512,7 @@ func postJSONDirect(rawURL string, payload any, out any) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 4500*time.Millisecond)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(data))
 	if err != nil {

@@ -50,6 +50,17 @@ func KazumiFilesDir() string {
 	return filepath.Join(config.Cfg.SavePath, "kazumi")
 }
 
+// KazumiCacheDir stores Kazumi browse/detail cache files in a dedicated directory.
+func KazumiCacheDir() string {
+	base := config.Cfg.CachePath
+	if base == "" {
+		base = KazumiFilesDir()
+	}
+	dir := filepath.Join(base, "kazumi")
+	_ = os.MkdirAll(dir, 0o755)
+	return dir
+}
+
 // StartKazumiDownload creates a task and downloads it in the background.
 func StartKazumiDownload(opts KazumiDownloadOptions) (*db.KazumiDownload, error) {
 	if err := ensureDB(); err != nil {
@@ -311,6 +322,10 @@ func runKazumiDownload(ctx context.Context, id int64, rule *kazumi.Rule, opts Ka
 		return
 	}
 	cleanupKazumiEpisodeFiles(dir, opts.Episode, "")
+
+	progressCtx, stopProgress := context.WithCancel(ctx)
+	defer stopProgress()
+	go trackKazumiProgress(progressCtx, id, dir, opts.Episode)
 
 	input, media, mediaReferer, _ := kazumi.ResolvePlayback(rule, opts.Source)
 	if input == "" {

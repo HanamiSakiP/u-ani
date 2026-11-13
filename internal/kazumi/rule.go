@@ -161,10 +161,74 @@ func Chapters(rule *Rule, source string) ([]Road, error) {
 	if rule == nil {
 		return nil, fmt.Errorf("rule is nil")
 	}
+	var (
+		roads []Road
+		err   error
+	)
 	if rule.ChapterMode == "api" {
-		return chaptersAPI(rule, source)
+		roads, err = chaptersAPI(rule, source)
+	} else {
+		roads, err = chaptersXPath(rule, source)
 	}
-	return chaptersXPath(rule, source)
+	if err != nil {
+		return nil, err
+	}
+	return filterMinorRoads(roads), nil
+}
+
+func filterMinorRoads(roads []Road) []Road {
+	if len(roads) <= 1 {
+		return roads
+	}
+	// Dedupe identical routes while preserving order.
+	unique := make([]Road, 0, len(roads))
+	seen := map[string]bool{}
+	for _, road := range roads {
+		key := strings.Join(road.URLs, "\x00")
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		unique = append(unique, road)
+	}
+	roads = unique
+	if len(roads) <= 1 {
+		return roads
+	}
+	maxCount := 0
+	for _, road := range roads {
+		if len(road.URLs) > maxCount {
+			maxCount = len(road.URLs)
+		}
+	}
+	if maxCount <= 1 {
+		return roads
+	}
+	kept := make([]Road, 0, len(roads))
+	for _, road := range roads {
+		count := len(road.URLs)
+		// Drop clearly minor/duplicate routes (e.g. trailers or broken split lines)
+		// when a much fuller route exists.
+		minor := false
+		switch {
+		case maxCount >= 6 && count*3 < maxCount:
+			minor = true
+		case maxCount >= 4 && count == 1:
+			minor = true
+		case maxCount >= 8 && count <= 2:
+			minor = true
+		case len(roads) == 2 && maxCount >= 4 && count <= maxCount/2:
+			// Common case: two routes where one source is obviously incomplete.
+			minor = true
+		}
+		if !minor {
+			kept = append(kept, road)
+		}
+	}
+	if len(kept) == 0 {
+		return roads
+	}
+	return kept
 }
 
 // IsMediaURL reports whether a URL already points at a media file.

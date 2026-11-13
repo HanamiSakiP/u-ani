@@ -232,9 +232,10 @@ var configGetCmd = &cobra.Command{
 }
 
 var searchCmd = &cobra.Command{
-	Use:   "search <keyword>",
-	Short: "Search torrents from data source by keyword.",
-	Args:  cobra.ExactArgs(1),
+	Use:     "search <keyword>",
+	Aliases: []string{"s", "find"},
+	Short:   "Search torrents from data source by keyword.",
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		keyword := args[0]
 		count, _ := cmd.Flags().GetInt("count")
@@ -284,8 +285,9 @@ var searchCmd = &cobra.Command{
 }
 
 var addCmd = &cobra.Command{
-	Use:   "add <names...>",
-	Short: "Subscribe bangumi.",
+	Use:     "add <names...>",
+	Aliases: []string{"a", "sub"},
+	Short:   "Subscribe bangumi.",
 	Args: func(cmd *cobra.Command, args []string) error {
 		bgm, _ := cmd.Flags().GetStringArray("bgm")
 		if len(args) == 0 && len(bgm) == 0 {
@@ -347,8 +349,9 @@ func setAddSavePath(name, savePath string) error {
 }
 
 var deleteCmd = &cobra.Command{
-	Use:   "delete <names...>",
-	Short: "Unsubscribe bangumi by name.",
+	Use:     "delete <names...>",
+	Aliases: []string{"rm", "del", "remove"},
+	Short:   "Unsubscribe bangumi by name.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		clearAll, _ := cmd.Flags().GetBool("clear-all")
 		yes, _ := cmd.Flags().GetBool("yes")
@@ -391,8 +394,9 @@ func followedBangumi() (map[string][]db.WeeklyBangumi, error) {
 }
 
 var listCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List subscribed bangumi.",
+	Use:     "list",
+	Aliases: []string{"ls"},
+	Short:   "List subscribed bangumi.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		followed, err := followedBangumi()
 		if err != nil {
@@ -501,8 +505,9 @@ var filterCmd = &cobra.Command{
 }
 
 var calCmd = &cobra.Command{
-	Use:   "cal",
-	Short: "Show the weekly bangumi calendar.",
+	Use:     "cal",
+	Aliases: []string{"c", "calendar"},
+	Short:   "Show the weekly bangumi calendar.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		forceUpdate, _ := cmd.Flags().GetBool("update")
 		forceLegacy, _ := cmd.Flags().GetBool("force-update")
@@ -619,9 +624,10 @@ var calCmd = &cobra.Command{
 }
 
 var fetchCmd = &cobra.Command{
-	Use:   "fetch <name>",
-	Short: "Fetch episode list for a subscribed bangumi.",
-	Args:  cobra.ExactArgs(1),
+	Use:     "fetch <name>",
+	Aliases: []string{"f", "eps"},
+	Short:   "Fetch episode list for a subscribed bangumi.",
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		if err := ensureDB(); err != nil {
@@ -665,8 +671,9 @@ var fetchCmd = &cobra.Command{
 }
 
 var updateCmd = &cobra.Command{
-	Use:   "update <names...>",
-	Short: "Update bangumi calendar and download new episodes.",
+	Use:     "update [names...]",
+	Aliases: []string{"up"},
+	Short:   "Update bangumi calendar and download new episodes.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		notIgnore, _ := cmd.Flags().GetBool("not-ignore")
 		if err := controllers.Update(args, true, notIgnore); err != nil {
@@ -1609,9 +1616,9 @@ func init() {
 	_ = configSetCmd.MarkFlagRequired("value")
 	configCmd.AddCommand(configGetCmd)
 
-	searchCmd.Flags().Int("count", 0, "Max page count of search results.")
-	searchCmd.Flags().String("regex-filter", "", "Regular expression filter for title.")
-	searchCmd.Flags().Bool("download", false, "Download search results.")
+	searchCmd.Flags().IntP("count", "c", 0, "Max page count of search results.")
+	searchCmd.Flags().StringP("regex-filter", "r", "", "Regular expression filter for title.")
+	searchCmd.Flags().BoolP("download", "d", false, "Download search results.")
 	searchCmd.Flags().String("download-as", "", "Bangumi name for download records and directory (with --download).")
 	searchCmd.Flags().Bool("dupe", false, "Show duplicated episodes.")
 	searchCmd.Flags().Int("min-episode", 0, "Minimum episode number filter.")
@@ -1650,10 +1657,10 @@ func init() {
 	_ = calCmd.Flags().MarkHidden("download-cover")
 	rootCmd.AddCommand(calCmd)
 
-	fetchCmd.Flags().Bool("not-ignore", false, "Include old rows (older than 3 months).")
+	fetchCmd.Flags().BoolP("not-ignore", "n", false, "Include old rows (older than 3 months).")
 	rootCmd.AddCommand(fetchCmd)
 
-	updateCmd.Flags().Bool("not-ignore", false, "Do not ignore the old bangumi detail rows (3 month ago)")
+	updateCmd.Flags().BoolP("not-ignore", "n", false, "Do not ignore the old bangumi detail rows (3 month ago).")
 	rootCmd.AddCommand(updateCmd)
 
 	genCmd.Flags().String("server-name", "", "")
