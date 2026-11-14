@@ -37,7 +37,7 @@
     calendar: {},
     timeline: { days: [], day: "" },
     recommend: { tag: "", query: "", subjects: [], cache: {}, categoriesLoaded: false },
-    files: { tab: "tasks", tasks: [], files: [], rules: [], catalog: [], catalogLoaded: false, settings: null, loaded: false },
+    files: { tab: "tasks", tasks: [], files: [], rules: [], catalog: [], catalogLoaded: false, settings: null, loaded: false, taskGroupOpen: {} },
     detail: { subjectId: 0, subject: null, local: null, name: "", tab: "overview", sections: {}, collectionType: 0, collectionLoaded: false, navItems: [], navIndex: -1 },
     watch: { name: "", loading: false, sources: [], selected: null, roads: [], error: "" },
     player: null,
@@ -184,6 +184,20 @@
     openDialog(noticeDialog);
     const ok = document.getElementById("notice-ok");
     if (ok) setTimeout(() => ok.focus(), 0);
+  }
+
+  function showChoice(title, text, choices) {
+    const icon = document.getElementById("notice-icon");
+    const titleNode = document.getElementById("notice-title");
+    const textNode = document.getElementById("notice-text");
+    const actions = noticeDialog ? noticeDialog.querySelector(".dialog-actions") : null;
+    if (icon) { icon.textContent = "i"; icon.className = "notice-icon info"; }
+    if (titleNode) titleNode.textContent = title;
+    if (textNode) textNode.textContent = text || "";
+    if (actions) {
+      actions.innerHTML = choices.map((choice) => `<button class="btn ${choice.primary ? "primary" : "ghost"}" type="button" data-action="${esc(choice.action)}">${esc(choice.label)}</button>`).join("");
+    }
+    openDialog(noticeDialog);
   }
 
   let loadingTimer = null;
@@ -339,10 +353,39 @@
         await clearDetailCache();
         break;
       case "export-follows":
+        chooseFollowExport();
+        break;
+      case "export-follows-json":
+        closeDialog(noticeDialog);
         await exportFollows();
+        break;
+      case "export-follows-bundle":
+        closeDialog(noticeDialog);
+        await exportFollowsBundle();
+        break;
+      case "close-notice":
+        closeDialog(noticeDialog);
         break;
       case "import-follows":
         importFollows();
+        break;
+      case "export-cache":
+        await exportCache();
+        break;
+      case "import-cache":
+        importCache();
+        break;
+      case "export-downloads":
+        await exportDownloads();
+        break;
+      case "import-downloads":
+        importDownloads();
+        break;
+      case "export-browse-cache":
+        await exportBrowseCache();
+        break;
+      case "import-browse-cache":
+        importBrowseCache();
         break;
       case "open-show":
         await openShow(target.dataset.id, target);
@@ -456,6 +499,32 @@
         state.watch.roads = [];
         state.watch.showAllRoads = false;
         renderWatch();
+        break;
+      case "local-watch-back":
+        if (state.detail && (state.detail.subjectId || state.detail.name || state.detail.local)) renderDetail();
+        else closeDialog(modal);
+        break;
+      case "player-back":
+        stopVideoPlayback();
+        modalBody.classList.remove("player-mode");
+        if (state.playerContext && state.playerContext.kind === "online") {
+          state.playerContext = null;
+          renderWatch();
+        } else if (state.playerContext && state.detail && state.detail.local) renderLocalWatch();
+        else closeDialog(modal);
+        break;
+      case "player-online-episode":
+        await playWatchEpisode(Number(target.dataset.road), Number(target.dataset.index));
+        break;
+      case "player-online-road":
+        await playWatchEpisode(Number(target.dataset.road), Number(target.dataset.episode));
+        break;
+      case "player-online-source":
+        await switchWatchSource(Number(target.dataset.index), { episodeIndex: Number(target.dataset.episode) });
+        break;
+      case "detail-back":
+        cancelDetailLoad();
+        closeDialog(modal);
         break;
       case "watch-show-all-roads":
         state.watch.showAllRoads = true;
@@ -638,6 +707,8 @@
       <button class="btn" data-action="cache-followed">更新追番信息</button>
       <button class="btn" data-action="export-follows">导出追番</button>
       <button class="btn" data-action="import-follows">导入追番</button>
+      <button class="btn" data-action="export-downloads">导出下载库</button>
+      <button class="btn" data-action="import-downloads">导入下载库</button>
       <button class="btn" data-action="update-all">追更下载</button>
       <button class="btn primary" data-action="add-subscription">添加订阅</button>
     `);
@@ -944,7 +1015,9 @@
 
 
   function playerEpisodesTemplate(context) {
-    const episodes = context && Array.isArray(context.episodes) ? context.episodes : [];
+    if (!context) return "";
+    if (context.kind === "online") return onlinePlayerEpisodesTemplate(context);
+    const episodes = Array.isArray(context.episodes) ? context.episodes : [];
     if (!episodes.length) return "";
     const current = String(context.current || "");
     return `
@@ -960,6 +1033,40 @@
       </div>`;
   }
 
+  function onlinePlayerEpisodesTemplate(context) {
+    const roads = Array.isArray(context.roads) ? context.roads : [];
+    if (!roads.length) return emptyState("◌", "该来源没有可用剧集");
+    const roadIndex = Math.max(0, Math.min(Number(context.roadIndex) || 0, roads.length - 1));
+    const road = roads[roadIndex];
+    const episodeIndex = Math.max(0, Math.min(Number(context.episodeIndex) || 0, (road.urls || []).length - 1));
+    const sources = (state.watch.sources || [])
+      .map((item, index) => ({ ...item, index }))
+      .filter((item) => item.source && !item.error);
+    const currentSource = Number(context.sourceIndex);
+    const sourceChips = sources.length > 1 ? `
+      <div class="chips" style="margin-bottom:10px">
+        <span class="muted small" style="align-self:center">切换来源：</span>
+        ${sources.map((item) => `<button class="chip ${item.index === currentSource ? "active" : ""}" data-action="player-online-source" data-index="${item.index}" data-episode="${episodeIndex}" title="${esc(item.source)}">${esc(item.rule)}${item.name ? ` · ${esc(item.name)}` : ""}</button>`).join("")}
+      </div>` : "";
+    const roadChips = roads.length > 1 ? `
+      <div class="chips" style="margin-bottom:10px">
+        <span class="muted small" style="align-self:center">切换线路：</span>
+        ${roads.map((item, index) => `<button class="chip ${index === roadIndex ? "active" : ""}" data-action="player-online-road" data-road="${index}" data-episode="${episodeIndex}">${esc(item.name || `线路 ${index + 1}`)}</button>`).join("")}
+      </div>` : "";
+    return `
+      <div class="player-episodes">
+        <div class="panel-head" style="margin-top:16px">
+          <h3>在线剧集</h3>
+          <span class="badge">${esc(road.name || `线路 ${roadIndex + 1}`)}</span>
+          <span class="muted small">${(road.urls || []).length} 集</span>
+        </div>
+        ${sourceChips}
+        ${roadChips}
+        <div class="episode-grid">${(road.urls || []).map((url, index) => `
+          <button class="episode-btn ${index === episodeIndex ? "active" : ""}" data-action="player-online-episode" data-road="${roadIndex}" data-index="${index}" title="${esc(url)}">${esc((road.names || [])[index] || `第 ${index + 1} 集`)}</button>`).join("")}</div>
+      </div>`;
+  }
+
   function detailPlayerContext() {
     const local = state.detail.local || {};
     const name = local.bangumi_name || local.name || state.detail.name || "本地视频";
@@ -972,6 +1079,20 @@
     return { name, episodes, current: "" };
   }
 
+  function onlinePlayerContext(roadIndex, episodeIndex) {
+    const source = state.watch.selected || {};
+    return {
+      kind: "online",
+      name: state.watch.name || "",
+      rule: source.rule || "",
+      sourceName: source.name || "",
+      sourceIndex: (state.watch.sources || []).indexOf(source),
+      roads: state.watch.roads || [],
+      roadIndex: Number(roadIndex) || 0,
+      episodeIndex: Number(episodeIndex) || 0,
+    };
+  }
+
   function openDetailEpisode(target) {
     const context = detailPlayerContext();
     context.current = String(target.dataset.episode || "");
@@ -981,7 +1102,10 @@
   function openPlayer(path, title, absolute = false, context = null) {
     stopVideoPlayback();
     modalBody.classList.add("player-mode");
-    state.playerContext = context && Array.isArray(context.episodes) ? context : null;
+    state.playerContext = context && (context.kind === "online" || Array.isArray(context.episodes)) ? context : null;
+    const contextBadge = !state.playerContext ? "" : state.playerContext.kind === "online"
+      ? `<span class="badge good">${esc(state.playerContext.rule || "在线")}${state.playerContext.sourceName ? ` · ${esc(state.playerContext.sourceName)}` : ""}</span>`
+      : `<span class="badge good">已缓存 ${state.playerContext.episodes.length} 集</span>`;
     const isAbsolute = absolute || /^https?:\/\//i.test(path) || /^\/(?:kazumi-files|bangumi)\//.test(path);
     let src = isAbsolute ? path : `/bangumi${path.startsWith("/") ? "" : "/"}${path}`;
     if (!/^https?:\/\//i.test(src)) {
@@ -989,7 +1113,7 @@
     }
     const isHLS = /\.m3u8(\?|$)/i.test(src);
     modalBody.innerHTML = `
-      <div class="panel-head player-head"><h2>${esc(title || "播放")}</h2>${state.playerContext ? `<span class="badge good">已缓存 ${state.playerContext.episodes.length} 集</span>` : ""}<div class="spacer"></div><a class="btn small" href="${esc(src)}" target="_blank" rel="noopener">新窗口打开</a></div>
+      <div class="panel-head player-head"><button class="btn small" data-action="player-back">← 返回</button><h2>${esc(title || "播放")}</h2>${contextBadge}<div class="spacer"></div><a class="btn small" href="${esc(src)}" target="_blank" rel="noopener">新窗口打开</a></div>
       <video class="player" id="player-video" controls autoplay></video>
       <p class="muted small">${isHLS ? "HLS 流媒体需要浏览器支持；已尝试使用 hls.js。" : "浏览器不支持的格式（如 MKV）请使用新窗口打开或本地播放器。"}</p>
       ${playerEpisodesTemplate(state.playerContext)}
@@ -1052,20 +1176,257 @@
     toast("追番信息已导出", "good");
   }
 
-  function importFollows() {
+  function chooseFollowExport() {
+    showChoice("导出追番", "可以只导出追番列表，也可以把已缓存的封面和番剧文字信息一起打包。", [
+      { label: "取消", action: "close-notice" },
+      { label: "仅追番 JSON", action: "export-follows-json" },
+      { label: "含封面/文字 ZIP", action: "export-follows-bundle", primary: true },
+    ]);
+  }
+
+  async function exportFollowsBundle() {
+    const date = new Date().toISOString().slice(0, 10);
+    const filename = `uani-follows-${date}.zip`;
+    const handle = await pickArchiveTarget(filename);
+    if (handle === null) return;
+    showLoading("正在打包追番（封面 + 文字）…");
+    try {
+      const response = await fetchArchive("/api/admin/bangumi/export/bundle");
+      if (await saveArchiveResponse(response, handle, filename)) {
+        toast("追番备份已导出（含封面与文字）", "good");
+      }
+    } finally {
+      hideLoading();
+    }
+  }
+
+  async function exportCache() {
+    showLoading("正在导出缓存数据…");
+    try {
+      const payload = await api("/api/admin/cache/export", { admin: true });
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `uani-cache-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+      toast("缓存数据已导出", "good");
+    } finally {
+      hideLoading();
+    }
+  }
+
+  function importCache() {
     const input = document.createElement("input");
     input.type = "file";
     input.accept = ".json,application/json";
     input.onchange = async () => {
       const file = input.files && input.files[0];
       if (!file) return;
-      showLoading("正在导入追番信息…");
+      if (!confirm("导入缓存会覆盖同一条目的本地缓存，但不会修改追番、订阅和已下载文件，继续吗？")) return;
+      showLoading("正在导入缓存数据…");
       try {
         const text = await file.text();
         const snapshot = JSON.parse(text);
-        const payload = await api("/api/admin/bangumi/import", { method: "POST", body: snapshot, admin: true });
+        const payload = await api("/api/admin/cache/import", { method: "POST", body: snapshot, admin: true });
+        showNotice("导入完成", payload.message || "缓存数据已导入", "good");
+        state.recommend.cache = {};
+        state.recommend.categoriesLoaded = false;
+        state.timeline.days = [];
+        state.timeline.day = "";
+        detailMemory.clear();
+        await renderRoute(false);
+      } catch (err) {
+        showNotice("导入失败", err.message || String(err), "bad");
+      } finally {
+        hideLoading();
+      }
+    };
+    input.click();
+  }
+
+  function archiveHeaders() {
+    if (!state.token) {
+      openTokenDialog();
+      throw new Error("请先设置管理令牌");
+    }
+    return { Authorization: `Bearer ${state.token}` };
+  }
+
+  async function fetchArchive(path) {
+    const response = await fetch(path, { headers: archiveHeaders() });
+    if (response.status === 403) {
+      openTokenDialog();
+      throw new Error("管理令牌无效，请重新设置");
+    }
+    if (!response.ok) {
+      let message = `${response.status} ${response.statusText}`;
+      try {
+        const payload = await response.json();
+        message = payload.detail || payload.message || message;
+      } catch (_) {}
+      throw new Error(message);
+    }
+    return response;
+  }
+
+  async function pickArchiveTarget(filename) {
+    if (!window.showSaveFilePicker) return undefined;
+    try {
+      return await window.showSaveFilePicker({ suggestedName: filename });
+    } catch (err) {
+      if (err && err.name === "AbortError") return null;
+      return undefined;
+    }
+  }
+
+  async function saveArchiveResponse(response, handle, filename) {
+    if (handle && response.body) {
+      const writable = await handle.createWritable();
+      await response.body.pipeTo(writable);
+      return true;
+    }
+    const blob = await response.blob();
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    return true;
+  }
+
+  async function uploadArchive(path, file) {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { ...archiveHeaders(), "Content-Type": "application/zip" },
+      body: file,
+    });
+    if (response.status === 403) {
+      openTokenDialog();
+      throw new Error("管理令牌无效，请重新设置");
+    }
+    if (!response.ok) {
+      let message = `${response.status} ${response.statusText}`;
+      try {
+        const payload = await response.json();
+        message = payload.detail || payload.message || message;
+      } catch (_) {}
+      throw new Error(message);
+    }
+    return response.json();
+  }
+
+  async function exportDownloads() {
+    const date = new Date().toISOString().slice(0, 10);
+    const filename = `uani-downloads-${date}.zip`;
+    const handle = await pickArchiveTarget(filename);
+    if (handle === null) return;
+    showLoading("正在打包下载库（视频 + 封面 + 信息）…");
+    try {
+      const response = await fetchArchive("/api/admin/kazumi/downloads/export");
+      if (await saveArchiveResponse(response, handle, filename)) {
+        toast("下载库压缩包已导出（含视频）", "good");
+      }
+    } finally {
+      hideLoading();
+    }
+  }
+
+  function importDownloads() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".zip,application/zip";
+    input.onchange = async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      if (!confirm("导入下载库压缩包会恢复视频文件、已缓存封面和番剧信息，并为缺失的已下载番剧补全追番条目，继续吗？")) return;
+      showLoading("正在导入下载库（视频 + 封面 + 信息）…");
+      try {
+        const payload = await uploadArchive("/api/admin/kazumi/downloads/import", file);
+        showNotice("导入完成", payload.message || "下载库已导入", "good");
+        state.subscriptions = [];
+        state.files.loaded = false;
+        state.files.tasks = [];
+        state.files.files = [];
+        state.files.taskGroupOpen = {};
+        detailMemory.clear();
+        await renderSubscriptions(true);
+      } catch (err) {
+        showNotice("导入失败", err.message || String(err), "bad");
+      } finally {
+        hideLoading();
+      }
+    };
+    input.click();
+  }
+
+  async function exportBrowseCache() {
+    const date = new Date().toISOString().slice(0, 10);
+    const filename = `uani-kazumi-cache-${date}.zip`;
+    const handle = await pickArchiveTarget(filename);
+    if (handle === null) return;
+    showLoading("正在打包 Kazumi 缓存（封面 + 文字）…");
+    try {
+      const response = await fetchArchive("/api/admin/kazumi/browse/export");
+      if (await saveArchiveResponse(response, handle, filename)) {
+        toast("Kazumi 时间表/推荐缓存已导出（含封面与文字）", "good");
+      }
+    } finally {
+      hideLoading();
+    }
+  }
+
+  function importBrowseCache() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".zip,application/zip";
+    input.onchange = async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      if (!confirm("导入会覆盖本地 Kazumi 时间表/推荐缓存，并恢复其中的封面和番剧文字信息，继续吗？")) return;
+      showLoading("正在导入 Kazumi 缓存（封面 + 文字）…");
+      try {
+        const payload = await uploadArchive("/api/admin/kazumi/browse/import", file);
+        showNotice("导入完成", payload.message || "Kazumi 缓存已导入", "good");
+        state.timeline.days = [];
+        state.timeline.day = "";
+        state.recommend.cache = {};
+        state.recommend.subjects = [];
+        state.recommend.categoriesLoaded = false;
+        await renderRoute(false);
+      } catch (err) {
+        showNotice("导入失败", err.message || String(err), "bad");
+      } finally {
+        hideLoading();
+      }
+    };
+    input.click();
+  }
+
+  function importFollows() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json,.zip,application/json,application/zip";
+    input.onchange = async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      const isZip = /\.zip$/i.test(file.name) || /zip/i.test(file.type);
+      showLoading(isZip ? "正在导入追番备份（封面 + 文字）…" : "正在导入追番信息…");
+      try {
+        let payload;
+        if (isZip) {
+          payload = await uploadArchive("/api/admin/bangumi/import/bundle", file);
+        } else {
+          const text = await file.text();
+          const snapshot = JSON.parse(text);
+          payload = await api("/api/admin/bangumi/import", { method: "POST", body: snapshot, admin: true });
+        }
         showNotice("导入完成", payload.message || "追番信息已导入", "good");
-        await renderSubscriptions();
+        await renderSubscriptions(true);
       } catch (err) {
         showNotice("导入失败", err.message || String(err), "bad");
       } finally {
@@ -1314,7 +1675,7 @@
   }
 
   async function renderKazumiTimeline(force = false) {
-    setActions(`<button class="btn" data-action="refresh">刷新</button><button class="btn" data-action="kazumi-browse-refresh">更新缓存</button><button class="btn" data-action="kazumi-browse-clear">清除缓存</button>`);
+    setActions(`<button class="btn" data-action="refresh">刷新</button><button class="btn" data-action="kazumi-browse-refresh">更新缓存</button><button class="btn" data-action="export-browse-cache">导出缓存</button><button class="btn" data-action="import-browse-cache">导入缓存</button><button class="btn" data-action="kazumi-browse-clear">清除缓存</button>`);
     const hasCache = state.timeline.days.length > 0;
     if (hasCache) renderTimelineContent();
     const url = force ? "/api/kazumi/timeline?refresh=1" : "/api/kazumi/timeline";
@@ -1377,7 +1738,7 @@
   let recommendCategoriesGeneration = 0;
 
   async function renderKazumiRecommend(force = false) {
-    setActions(`<button class="btn" data-action="refresh">刷新</button><button class="btn" data-action="kazumi-browse-refresh">更新缓存</button><button class="btn" data-action="kazumi-browse-clear">清除缓存</button>`);
+    setActions(`<button class="btn" data-action="refresh">刷新</button><button class="btn" data-action="kazumi-browse-refresh">更新缓存</button><button class="btn" data-action="export-browse-cache">导出缓存</button><button class="btn" data-action="import-browse-cache">导入缓存</button><button class="btn" data-action="kazumi-browse-clear">清除缓存</button>`);
     const hasCache = state.recommend.subjects.length > 0;
     if (hasCache) renderRecommendPage();
     if (!state.recommend.categoriesLoaded) loadRecommendationCategories().catch(() => {});
@@ -1660,7 +2021,11 @@
 
   function rememberedDetailSection(subjectId, tab) {
     const entry = rememberedDetail(subjectId);
-    return entry && entry.sections ? entry.sections[tab] || null : null;
+    const section = entry && entry.sections ? entry.sections[tab] || null : null;
+    // Never serve a previous "unavailable" response from memory; opening or
+    // retrying the tab should ask the mirrors again.
+    if (section && section.unavailable) return null;
+    return section;
   }
 
   function prefetchDetailSubject(subjectId) {
@@ -1827,7 +2192,7 @@
       const payload = await api(`/api/kazumi/subject/${subjectId}/${endpoint}${suffix}`, signal ? { signal } : {});
       if (state.detail._requestId !== rid || state.detail.subjectId !== subjectId) return;
       state.detail.sections[tab] = payload;
-      rememberDetailSection(subjectId, tab, payload);
+      if (!(payload && payload.unavailable)) rememberDetailSection(subjectId, tab, payload);
     } catch (err) {
       if (err && err.name === "AbortError") return;
       if (state.detail._requestId !== rid || state.detail.subjectId !== subjectId) return;
@@ -1867,13 +2232,14 @@
   function detailNavigation() {
     const items = state.detail.navItems || [];
     const index = Number(state.detail.navIndex);
-    if (items.length < 2 || index < 0) return "";
-    return `
-      <div class="detail-nav">
+    let html = `<div class="detail-nav"><button class="btn small" data-action="detail-back">← 返回</button>`;
+    if (items.length >= 2 && index >= 0) {
+      html += `
         <button class="btn small" data-action="detail-nav" data-delta="-1" ${index <= 0 ? "disabled" : ""}>‹ 上一部</button>
         <span class="muted small">${index + 1} / ${items.length}</span>
-        <button class="btn small" data-action="detail-nav" data-delta="1" ${index >= items.length - 1 ? "disabled" : ""}>下一部 ›</button>
-      </div>`;
+        <button class="btn small" data-action="detail-nav" data-delta="1" ${index >= items.length - 1 ? "disabled" : ""}>下一部 ›</button>`;
+    }
+    return html + `</div>`;
   }
 
   async function navigateDetail(delta) {
@@ -2026,7 +2392,14 @@
         user: item.user || {},
       };
     });
-    if (!items.length) return emptyState("…", "还没有吐槽");
+    if (!items.length) {
+      return `
+        <div class="empty" style="padding:28px 10px">
+          <div class="big">…</div>
+          <div class="muted" style="margin-bottom:12px">还没有吐槽</div>
+          <button class="btn small" data-action="detail-retry" data-tab="comments">重新加载吐槽</button>
+        </div>`;
+    }
     return `<div class="list">${items.map((item) => `
       <div class="comment-row fade-in">
         ${item.user && item.user.cover ? `<img class="avatar" src="${esc(coverURL(item.user.cover))}" referrerpolicy="no-referrer" loading="lazy" data-action="open-image" data-src="${esc(coverURL(item.user.cover))}" data-title="${esc(item.user.nickname || item.user.username || "")}" alt="" onerror="this.remove()" />` : `<div class="avatar avatar-fallback">${esc((item.user && (item.user.nickname || item.user.username) || "?").slice(0, 1))}</div>`}
@@ -2099,20 +2472,35 @@
       return;
     }
     const subjectId = state.detail.subjectId;
-    const rememberedSection = rememberedDetailSection(subjectId, tab);
+    // A forced retry (the retry button) must always hit the network instead of
+    // replaying the in-memory section that just failed.
+    const rememberedSection = force ? null : rememberedDetailSection(subjectId, tab);
     if (rememberedSection) {
       state.detail.sections[tab] = rememberedSection;
       renderDetail();
       return;
     }
-    const suffix = state.detail.localOnly ? "?local=1" : "";
+    const params = [];
+    // Retrying a failed section must leave local-only mode: otherwise the
+    // server keeps returning the local (possibly empty) cache and the retry
+    // can never succeed.
+    if (state.detail.localOnly && !force) params.push("local=1");
+    if (force) {
+      params.push("refresh=1");
+      params.push(`t=${Date.now()}`);
+    }
+    const suffix = params.length ? `?${params.join("&")}` : "";
     state.detail.sections[tab] = { loading: true };
     renderDetail();
     try {
       const payload = await api(`/api/kazumi/subject/${subjectId}/${endpoint}${suffix}`);
       if (state.detail.subjectId !== subjectId) return;
       state.detail.sections[tab] = payload;
-      rememberDetailSection(subjectId, tab, payload);
+      if (!(payload && payload.unavailable)) rememberDetailSection(subjectId, tab, payload);
+      if (force && tab === "comments" && payload && !payload.unavailable &&
+          Array.isArray(payload.items) && payload.items.length === 0) {
+        toast("该条目暂时没有吐槽，可稍后重试", "warn");
+      }
     } catch (err) {
       if (state.detail.subjectId !== subjectId) return;
       state.detail.sections[tab] = { error: err.message || String(err) };
@@ -2168,7 +2556,22 @@
     if (!id) throw new Error("缺少追番 ID");
     const payload = await api(`/api/player/${encodeURIComponent(id)}`);
     const item = payload.data || {};
-    state.detail = { ...state.detail, name: item.bangumi_name || name || "", local: item };
+    const title = item.bangumi_name || name || "";
+    state.detail = {
+      subjectId: 0,
+      subject: null,
+      local: item,
+      name: title,
+      tab: "overview",
+      sections: {},
+      collectionType: item.bangumi_name ? Number(item.collection_type || 3) : 0,
+      collectionLoaded: false,
+      navItems: [],
+      navIndex: -1,
+      localOnly: true,
+      loading: false,
+      loadError: "",
+    };
     if (!localPlayerEntries().length) {
       toast("这部番还没有下载完成的视频", "warn");
       return;
@@ -2186,6 +2589,7 @@
     }
     modalBody.innerHTML = `
       <div class="panel-head">
+        <button class="btn small" data-action="local-watch-back">← 返回</button>
         <h2>开始观看</h2><span class="badge good">本地已下载 ${episodes.length} 集</span>
         <div class="spacer"></div>
         <button class="btn small" data-action="watch-online" data-name="${esc(name)}">在线搜索更多来源</button>
@@ -2399,7 +2803,7 @@
     }
     if (payload && payload.media && payload.url) {
       try {
-        openPlayer(payload.url, title, true, null);
+        openPlayer(payload.url, title, true, onlinePlayerContext(roadIndex, episodeIndex));
         return;
       } catch (_) {}
     }
@@ -2420,6 +2824,33 @@
       return;
     }
     showNotice("无播放地址", "未解析到可用的视频地址，可返回列表尝试其他来源。", "warn");
+  }
+
+  async function switchWatchSource(index, options = {}) {
+    const item = state.watch.sources[index];
+    if (!item || !item.source) throw new Error("来源不可用");
+    const wantedEpisode = Math.max(0, Number(options.episodeIndex) || 0);
+    showLoading("正在切换来源…");
+    let roads = [];
+    try {
+      const payload = await api("/api/admin/kazumi/chapters", { method: "POST", body: { rule: item.rule, source: item.source }, admin: true });
+      roads = payload.roads || [];
+    } catch (err) {
+      showNotice("切换来源失败", err.message || String(err), "bad");
+      return;
+    } finally {
+      hideLoading();
+    }
+    if (!roads.length) {
+      showNotice("来源不可用", "该来源没有可用剧集，请换一个来源。", "warn");
+      return;
+    }
+    state.watch.selected = item;
+    state.watch.roads = roads;
+    state.watch.showAllRoads = false;
+    const bestRoad = roads.reduce((best, road, idx, list) => ((road.urls || []).length > (list[best].urls || []).length ? idx : best), 0);
+    const episodeIndex = Math.min(wantedEpisode, Math.max(0, (roads[bestRoad].urls || []).length - 1));
+    await playWatchEpisode(bestRoad, episodeIndex);
   }
 
   async function loadWatchChapters(index) {
@@ -2588,7 +3019,7 @@
       <p class="muted small">搜索、吐槽和详情接口都会并发尝试这些地址；留空使用默认镜像。</p>
       <div class="list">${mirrors}</div>
       <div class="toolbar" style="margin-top:12px">
-        <div class="searchbox grow"><input id="bangumi-mirror-new" type="text" placeholder="https://api.kazumi.fyi" /></div>
+        <div class="searchbox grow"><input id="bangumi-mirror-new" type="text" placeholder="https://next.bangumi.lat" /></div>
         <button class="btn" data-action="add-bangumi-mirror">添加</button>
         <button class="btn" data-action="use-bangumi-origin">原地址</button>
       </div>
@@ -2686,8 +3117,10 @@
           state.files.tasks = payload.tasks || [];
           if (state.files.tab === "tasks") {
             const body = document.getElementById("files-body");
-            if (body) body.innerHTML = tasksTemplate(state.files.tasks);
-            else renderFilesContent();
+            if (body) {
+              body.innerHTML = tasksTemplate(state.files.tasks);
+              bindTaskGroups();
+            } else renderFilesContent();
           }
         } catch (_) {}
       }, 5000);
@@ -2731,6 +3164,7 @@
         : rulesTemplate(rules)}</div>
     `;
     if (tab === "catalog") bindCatalogFilter();
+    if (tab === "tasks") bindTaskGroups();
   }
 
   function statusBadge(status) {
@@ -2743,18 +3177,103 @@
     }
   }
 
+  function taskStatusPriority(status) {
+    const value = Number(status);
+    if (value === 1 || value === 0) return 0;
+    if (value === 3) return 1;
+    if (value === 2) return 2;
+    return 3;
+  }
+
+  function groupedTasks(tasks) {
+    const groups = new Map();
+    for (const task of tasks) {
+      const key = task.name || task.display_name || "未知番剧";
+      const title = task.display_name || task.name || "未知番剧";
+      let group = groups.get(key);
+      if (!group) {
+        group = { key, title, cover: "", tasks: [], running: 0, queued: 0, done: 0, failed: 0, canceled: 0, size: 0, modified: 0 };
+        groups.set(key, group);
+      }
+      if (!group.cover && task.cover) group.cover = task.cover;
+      group.tasks.push(task);
+      group.size += Number(task.size) || 0;
+      group.modified = Math.max(group.modified, Number(task.updated_time) || 0);
+      const status = Number(task.status);
+      if (status === 1) group.running++;
+      else if (status === 2) group.done++;
+      else if (status === 3) group.failed++;
+      else if (status === 4) group.canceled++;
+      else group.queued++;
+    }
+    const out = Array.from(groups.values());
+    for (const group of out) {
+      group.active = group.running + group.queued + group.failed > 0;
+      group.tasks.sort((a, b) => taskStatusPriority(a.status) - taskStatusPriority(b.status) || (Number(b.episode) || 0) - (Number(a.episode) || 0));
+      group.latest = group.tasks.reduce((best, task) => ((Number(task.episode) || 0) >= (Number(best.episode) || 0) ? task : best), group.tasks[0]);
+    }
+    out.sort((a, b) => Number(b.active) - Number(a.active) || b.modified - a.modified || a.title.localeCompare(b.title));
+    return out;
+  }
+
+  function bindTaskGroups() {
+    $$("#files-body details.task-group").forEach((element) => {
+      element.addEventListener("toggle", () => {
+        state.files.taskGroupOpen[element.dataset.group] = element.open;
+      });
+    });
+  }
+
   function tasksTemplate(tasks) {
     if (!tasks.length) return emptyState("⇣", "还没有 Kazumi 下载任务");
-    const failedCount = tasks.filter((task) => Number(task.status) === 3).length;
+    const groups = groupedTasks(tasks);
+    const counts = tasks.reduce((acc, task) => {
+      const status = Number(task.status);
+      if (status === 1) acc.running++;
+      else if (status === 2) acc.done++;
+      else if (status === 3) acc.failed++;
+      else if (status === 4) acc.canceled++;
+      else acc.queued++;
+      return acc;
+    }, { running: 0, queued: 0, done: 0, failed: 0, canceled: 0 });
+    const failedCount = counts.failed;
     const actions = failedCount ? `
       <div class="toolbar" style="margin-bottom:12px">
         <button class="btn small" data-action="retry-failed-tasks">一键重试失败 (${failedCount})</button>
         <button class="btn small danger" data-action="delete-failed-tasks">一键删除失败 (${failedCount})</button>
       </div>` : "";
-    return `<div class="panel">${actions}<div class="list">${tasks.map((task) => {
+    const stats = `<div class="task-stats">
+      ${counts.running ? `<span class="badge warn"><span class="spin" style="width:10px;height:10px"></span> 下载中 ${counts.running}</span>` : ""}
+      ${counts.queued ? `<span class="badge muted">等待中 ${counts.queued}</span>` : ""}
+      ${counts.done ? `<span class="badge good">已完成 ${counts.done}</span>` : ""}
+      ${counts.failed ? `<span class="badge bad">失败 ${counts.failed}</span>` : ""}
+      ${counts.canceled ? `<span class="badge muted">已取消 ${counts.canceled}</span>` : ""}
+    </div>`;
+    return `<div class="panel">${stats}${actions}<div class="task-groups">${groups.map((group) => {
+      const cover = coverURL(group.cover);
+      const open = typeof state.files.taskGroupOpen[group.key] === "boolean" ? state.files.taskGroupOpen[group.key] : group.active;
+      return `
+      <details class="task-group" data-group="${esc(group.key)}" ${open ? "open" : ""}>
+        <summary class="task-group-head">
+          ${cover ? `<img class="file-cover" loading="lazy" src="${esc(cover)}" alt="" referrerpolicy="no-referrer" onerror="this.style.display='none'" />` : `<div class="file-cover file-cover-fallback">${esc(String(group.title).slice(0, 1) || "⇣")}</div>`}
+          <div class="grow">
+            <div class="title">${esc(group.title)} <span class="badge muted">${group.tasks.length} 集</span></div>
+            <div class="sub">${[
+              group.running ? `下载中 ${group.running}` : "",
+              group.queued ? `等待 ${group.queued}` : "",
+              group.done ? `完成 ${group.done}` : "",
+              group.failed ? `失败 ${group.failed}` : "",
+              formatSize(group.size),
+              formatTime(group.modified),
+            ].filter(Boolean).join(" · ")}</div>
+          </div>
+          <span class="media-chevron" aria-hidden="true">▾</span>
+        </summary>
+        <div class="list task-episodes">${group.tasks.map((task) => {
       const running = Number(task.status) === 1 || Number(task.status) === 0;
       const speed = Number(task.speed) || 0;
       const size = Number(task.size) || 0;
+      const episode = Number(task.episode) || 0;
       const progress = running ? `
         <div style="margin-top:8px">
           <div class="chips" style="gap:6px;margin-bottom:6px">
@@ -2765,35 +3284,88 @@
           <div class="progress"><i class="indeterminate"></i></div>
         </div>` : "";
       return `
-      <div class="row" style="align-items:flex-start">
-        <div class="grow">
-          <div class="title">${esc(task.name)} <span class="badge muted">EP ${task.episode}</span></div>
-          <div class="sub">${esc(task.rule)}${!running ? ` · 已下载 ${formatSize(size)}` : ""}${speed > 0 && !running ? ` · ${formatSize(speed)}/s` : ""} · ${esc(formatTime(task.updated_time))}</div>
-          ${progress}
-          ${task.error ? `<div class="sub" style="color:var(--bad);margin-top:6px" title="${esc(task.error)}">${esc(task.error)}</div>` : ""}
-        </div>
-        <div class="actions">
-          ${statusBadge(task.status)}
-          ${task.path ? `<button class="btn small" data-action="play-file" data-path="${esc(task.path)}" data-name="${esc(task.name)}">播放</button>` : ""}
-          ${Number(task.status) <= 1
-            ? `<button class="btn small danger" data-action="cancel-task" data-id="${task.id}">取消</button>`
-            : `<button class="btn small" data-action="retry-task" data-id="${task.id}">重试</button><button class="btn small danger" data-action="delete-task" data-id="${task.id}">删除</button>`}
-        </div>
-      </div>`;
+          <div class="row task-row" style="align-items:flex-start">
+            <span class="badge ${Number(task.status) === 3 ? "bad" : episode ? "muted" : "muted"}">${episode ? `EP ${episode}` : "EP ?"}</span>
+            <div class="grow">
+              <div class="title">${esc(task.title || task.name)}</div>
+              <div class="sub">${esc(task.rule || "-")}${!running ? ` · 已下载 ${formatSize(size)}` : ""}${speed > 0 && !running ? ` · ${formatSize(speed)}/s` : ""} · ${esc(formatTime(task.updated_time))}</div>
+              ${progress}
+              ${task.error ? `<div class="sub" style="color:var(--bad);margin-top:6px" title="${esc(task.error)}">${esc(task.error)}</div>` : ""}
+            </div>
+            <div class="actions">
+              ${statusBadge(task.status)}
+              ${task.path && Number(task.status) === 2 ? `<button class="btn small" data-action="play-file" data-path="${esc(task.path)}" data-name="${esc(group.title)}${episode ? ` 第 ${episode} 集` : ""}">播放</button>` : ""}
+              ${Number(task.status) <= 1
+          ? `<button class="btn small danger" data-action="cancel-task" data-id="${task.id}">取消</button>`
+          : `<button class="btn small" data-action="retry-task" data-id="${task.id}">重试</button><button class="btn small danger" data-action="delete-task" data-id="${task.id}">删除</button>`}
+            </div>
+          </div>`;
+    }).join("")}</div>
+      </details>`;
     }).join("")}</div></div>`;
+  }
+
+  function groupedMediaFiles(files) {
+    const groups = new Map();
+    for (const file of files) {
+      const folder = String(file.path || "").split("/")[0] || "";
+      const key = file.bangumi_name || file.display_name || folder || file.name || "未命名";
+      const title = file.display_name || file.bangumi_name || folder || file.name || "未命名";
+      let group = groups.get(key);
+      if (!group) {
+        group = { key, title, cover: "", files: [] };
+        groups.set(key, group);
+      }
+      if (!group.cover && file.cover) group.cover = file.cover;
+      group.files.push(file);
+    }
+    const out = Array.from(groups.values());
+    for (const group of out) {
+      group.files.sort((a, b) => (Number(a.episode) || 0) - (Number(b.episode) || 0) || String(a.name).localeCompare(String(b.name)));
+      group.totalSize = group.files.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
+      group.modified = group.files.reduce((max, file) => Math.max(max, Number(file.modified) || 0), 0);
+      group.latest = group.files.reduce((best, file) => ((Number(file.episode) || 0) >= (Number(best.episode) || 0) ? file : best), group.files[0]);
+    }
+    out.sort((a, b) => b.modified - a.modified || a.title.localeCompare(b.title));
+    return out;
   }
 
   function filesTemplate(files) {
     if (!files.length) return emptyState("▤", "Kazumi 下载目录还是空的");
-    return `<div class="panel"><div class="list">${files.map((file) => `
-      <div class="row">
-        <div class="grow"><div class="title">${esc(file.path)}</div><div class="sub">${formatSize(file.size)} · ${esc(formatTime(file.modified))}</div></div>
-        <div class="actions">
-          <button class="btn small" data-action="play-file" data-path="${esc(file.path)}" data-name="${esc(file.name)}">播放</button>
-          <a class="btn small" href="/kazumi-files/${encodeURI(file.path)}" target="_blank" rel="noopener">打开</a>
-          <button class="btn small danger" data-action="delete-file" data-path="${esc(file.path)}">删除</button>
-        </div>
-      </div>`).join("")}</div></div>`;
+    const groups = groupedMediaFiles(files);
+    return `<div class="panel"><div class="panel-head"><h2>媒体文件</h2><span class="badge muted">${groups.length} 部番剧</span><span class="badge muted">${files.length} 集</span><div class="spacer"></div><span class="muted small">同名番剧已合并，点击展开选集</span></div><div class="media-groups">${groups.map((group) => {
+      const cover = coverURL(group.cover);
+      const latestEpisode = Number(group.latest.episode) || 0;
+      const fallback = esc(String(group.title).slice(0, 1) || "▤");
+      return `
+      <details class="media-group" data-group="${esc(group.key)}">
+        <summary class="media-group-head">
+          ${cover ? `<img class="file-cover" loading="lazy" src="${esc(cover)}" alt="" referrerpolicy="no-referrer" onerror="this.style.display='none'" />` : `<div class="file-cover file-cover-fallback">${fallback}</div>`}
+          <div class="grow">
+            <div class="title">${esc(group.title)} <span class="badge muted">${group.files.length} 集</span></div>
+            <div class="sub">${latestEpisode ? `最新 EP ${latestEpisode} · ` : ""}${formatSize(group.totalSize)} · ${esc(formatTime(group.modified))} · 点击展开选集</div>
+          </div>
+          <span class="media-chevron" aria-hidden="true">▾</span>
+        </summary>
+        <div class="list media-episodes">${group.files.map((file) => {
+          const episode = Number(file.episode) || 0;
+          const episodeTitle = file.title || file.name;
+          return `
+          <div class="row file-row">
+            <span class="badge ${episode ? "warn" : "muted"}">${episode ? `EP ${episode}` : "EP ?"}</span>
+            <div class="grow">
+              <div class="title">${esc(episodeTitle)}</div>
+              <div class="sub">${formatSize(file.size)} · ${esc(formatTime(file.modified))} · ${esc(file.path)}</div>
+            </div>
+            <div class="actions">
+              <button class="btn small" data-action="play-file" data-path="${esc(file.path)}" data-name="${esc(group.title)}${episode ? ` 第 ${episode} 集` : ""}">播放</button>
+              <a class="btn small" href="/kazumi-files/${encodeURI(file.path)}" target="_blank" rel="noopener">打开</a>
+              <button class="btn small danger" data-action="delete-file" data-path="${esc(file.path)}">删除</button>
+            </div>
+          </div>`;
+        }).join("")}</div>
+      </details>`;
+    }).join("")}</div></div>`;
   }
 
   function rulesTemplate(rules) {
@@ -3033,7 +3605,7 @@
               <p class="muted small">搜索、吐槽和详情会优先使用当前镜像，并并发尝试列表中的地址。</p>
               <div class="list">${bangumiMirrorRows(kazumiSettings.bangumi_mirrors || [], kazumiSettings.bangumi_mirror || (kazumiSettings.bangumi_mirrors || [])[0] || "")}</div>
               <div class="toolbar" style="margin-top:12px">
-                <div class="searchbox grow"><input id="bangumi-mirror-new" type="text" placeholder="https://api.kazumi.fyi" /></div>
+                <div class="searchbox grow"><input id="bangumi-mirror-new" type="text" placeholder="https://next.bangumi.lat" /></div>
                 <button class="btn" data-action="add-bangumi-mirror">添加</button>
                 <button class="btn" data-action="use-bangumi-origin">原地址</button>
               </div>
@@ -3050,7 +3622,7 @@
               <div class="row"><div class="grow"><div class="title">前端</div><div class="sub">内置 Web UI</div></div></div>
               <div class="row"><div class="grow"><div class="title">日历订阅</div><div class="sub"><a class="mono" href="/resource/calendar.ics" target="_blank">/resource/calendar.ics</a></div></div></div>
               <div class="row"><div class="grow"><div class="title">MCP</div><div class="sub"><span class="mono">/mcp</span> · <span class="mono">/mcp/sse</span></div></div></div>
-              <div class="row"><div class="grow"><div class="title">缓存</div><div class="sub">清除番剧详情/吐槽缓存，保留追番、订阅与下载信息</div></div><div class="actions"><button class="btn small" data-action="clear-detail-cache">清理缓存</button></div></div>
+              <div class="row"><div class="grow"><div class="title">缓存</div><div class="sub">导出 / 导入番剧详情、吐槽与 Kazumi 时间表/推荐缓存；清理只影响缓存，保留追番、订阅与下载信息</div></div><div class="actions"><button class="btn small" data-action="export-cache">导出缓存</button><button class="btn small" data-action="import-cache">导入缓存</button><button class="btn small danger" data-action="clear-detail-cache">清理缓存</button></div></div>
             </div>
           </section>
           <section class="panel">

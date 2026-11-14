@@ -136,6 +136,19 @@ func TestResolveMediaURL(t *testing.T) {
 	}
 }
 
+func TestResolveDirectMediaURL(t *testing.T) {
+	// API rules (e.g. giriGiriLove) return the media file itself as the episode
+	// URL, so resolution must not try to fetch it as an HTML page.
+	media := "https://cdn.example.com/video/01.mp4?token=abc"
+	input, isMedia, referer, err := ResolvePlayback(&Rule{Name: "direct"}, media)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isMedia || input != media || referer != "" {
+		t.Fatalf("input=%q media=%v referer=%q", input, isMedia, referer)
+	}
+}
+
 func TestJSONPathSubset(t *testing.T) {
 	var document any
 	if err := json.Unmarshal([]byte(`{"data":{"roads":[{"name":"A","eps":[{"url":"u1"}]}]}}`), &document); err != nil {

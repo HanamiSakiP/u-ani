@@ -316,7 +316,7 @@ func handleKazumiCharacters(w http.ResponseWriter, r *http.Request, rawID string
 	if !ok {
 		return
 	}
-	if r.URL.Query().Get("local") == "1" {
+	if localOnlySectionRequest(r) {
 		if payload, ok := cachedSectionPayload(subjectID, "characters"); ok {
 			writeJSON(w, http.StatusOK, map[string]any{"items": payload, "cached": true})
 			return
@@ -357,7 +357,7 @@ func handleKazumiStaff(w http.ResponseWriter, r *http.Request, rawID string) {
 	if !ok {
 		return
 	}
-	if r.URL.Query().Get("local") == "1" {
+	if localOnlySectionRequest(r) {
 		if payload, ok := cachedSectionPayload(subjectID, "staff"); ok {
 			writeJSON(w, http.StatusOK, map[string]any{"items": payload, "cached": true})
 			return
@@ -392,7 +392,7 @@ func handleKazumiRelations(w http.ResponseWriter, r *http.Request, rawID string)
 	if !ok {
 		return
 	}
-	if r.URL.Query().Get("local") == "1" {
+	if localOnlySectionRequest(r) {
 		if payload, ok := cachedSectionPayload(subjectID, "relations"); ok {
 			writeJSON(w, http.StatusOK, map[string]any{"items": payload, "cached": true})
 			return
@@ -427,7 +427,7 @@ func handleKazumiComments(w http.ResponseWriter, r *http.Request, rawID string) 
 	if !ok {
 		return
 	}
-	if r.URL.Query().Get("local") == "1" {
+	if localOnlySectionRequest(r) {
 		if payload, ok := cachedSectionPayload(subjectID, "comments"); ok {
 			writeJSON(w, http.StatusOK, payload)
 			return
@@ -454,7 +454,21 @@ func handleKazumiComments(w http.ResponseWriter, r *http.Request, rawID string) 
 		return map[string]any{"items": out, "total": page.Total}, nil
 	})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		if payload, ok := cachedSectionPayload(subjectID, "comments"); ok {
+			// A forced retry must not look successful by replaying an empty
+			// cache entry; show the unavailable state with a retry button.
+			if !refresh || payloadHasComments(payload) {
+				writeJSON(w, http.StatusOK, payload)
+				return
+			}
+		}
+		// Keep the 吐槽 tab usable even when every mirror is unreachable. The
+		// frontend renders an unavailable state with a retry button instead of
+		// showing a hard request error.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"items": []any{}, "total": 0, "cached": false,
+			"unavailable": true, "message": err.Error(),
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, normalizeCommentsPayload(payload))
@@ -534,6 +548,13 @@ func enrichSubjectPayload(subjectID int, payload map[string]any) map[string]any 
 	return payload
 }
 
+// localOnlySectionRequest reports whether a section request should be served
+// strictly from the local cache. An explicit refresh always wins so the retry
+// button on a local-only detail page can reach the network.
+func localOnlySectionRequest(r *http.Request) bool {
+	return r.URL.Query().Get("local") == "1" && r.URL.Query().Get("refresh") != "1"
+}
+
 func parseSubjectIDParam(w http.ResponseWriter, raw string) (int, bool) {
 	id, err := strconv.Atoi(raw)
 	if err != nil || id <= 0 {
@@ -564,7 +585,12 @@ func loadCachedSection(subjectID int, section string, force bool, fetch func() (
 		if cached != "" {
 			var fallback any
 			if json.Unmarshal([]byte(cached), &fallback) == nil {
-				return controllers.LocalizePayloadImages(fallback), nil
+				// For a forced comments refresh, an empty cache is not a useful
+				// fallback: report the failure so the UI shows "unavailable"
+				// instead of pretending the subject has no comments.
+				if !force || section != "comments" || payloadHasComments(fallback) {
+					return controllers.LocalizePayloadImages(fallback), nil
+				}
 			}
 		}
 		return nil, err

@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -134,6 +135,44 @@ func decodeJSON(t *testing.T, resp *http.Response) map[string]any {
 		t.Fatal(err)
 	}
 	return out
+}
+
+func requestRaw(t *testing.T, server *httptest.Server, method, path string, body []byte, contentType, token string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(method, server.URL+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func makeTestZip(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	for name, data := range files {
+		entry, err := writer.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write([]byte(data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
 }
 
 func TestAPIIndexCalendarAndPlayer(t *testing.T) {
@@ -1094,5 +1133,269 @@ func TestCardCoverPrefersSmallerThumbnail(t *testing.T) {
 	}
 	if got := cardCover(bgmtv.Images{Large: "large"}); got != "large" {
 		t.Fatalf("cardCover fallback = %q, want large", got)
+	}
+}
+
+func TestCacheExportImportEndpoints(t *testing.T) {
+	setupHTTPTest(t)
+	if err := db.Conn.SaveBangumiCache(&db.BangumiCache{
+		SubjectID: 101,
+		Overview:  `{"name":"导出测试"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(Handler())
+	defer server.Close()
+
+	resp := request(t, server, http.MethodGet, "/api/admin/cache/export", nil, testToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("export status = %d", resp.StatusCode)
+	}
+	exported := decodeJSON(t, resp)
+	subjects, _ := exported["subjects"].([]any)
+	if len(subjects) != 1 {
+		t.Fatalf("subjects = %#v", exported["subjects"])
+	}
+
+	resp = request(t, server, http.MethodPost, "/api/admin/cache/import", map[string]any{
+		"version": 1,
+		"subjects": []any{map[string]any{
+			"subject_id": 202,
+			"overview":   `{"name":"导入测试"}`,
+		}},
+	}, testToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("import status = %d", resp.StatusCode)
+	}
+	imported := decodeJSON(t, resp)
+	result, _ := imported["result"].(map[string]any)
+	if fmt.Sprint(result["imported"]) != "1" {
+		t.Fatalf("import result = %#v", imported)
+	}
+	cache, err := db.Conn.GetBangumiCache(202)
+	if err != nil || cache.Overview == "" {
+		t.Fatalf("cache = %#v, err = %v", cache, err)
+	}
+
+	// The Kazumi-prefixed alias must route to the same handlers.
+	resp = request(t, server, http.MethodGet, "/api/admin/kazumi/cache/export", nil, testToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("kazumi export status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestKazumiCommentsUnavailableWithoutCache(t *testing.T) {
+	setupHTTPTest(t)
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream down", http.StatusBadGateway)
+	}))
+	defer apiServer.Close()
+	oldBase := bgmtv.APIBase
+	bgmtv.APIBase = apiServer.URL
+	defer func() { bgmtv.APIBase = oldBase }()
+
+	server := httptest.NewServer(Handler())
+	defer server.Close()
+
+	resp := request(t, server, http.MethodGet, "/api/kazumi/subject/999/comments", nil, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body := decodeJSON(t, resp)
+	if body["unavailable"] != true {
+		t.Fatalf("body = %#v", body)
+	}
+	if items, _ := body["items"].([]any); len(items) != 0 {
+		t.Fatalf("items = %#v", body["items"])
+	}
+	if message, _ := body["message"].(string); message == "" {
+		t.Fatalf("message = %#v", body["message"])
+	}
+}
+
+func TestKazumiCommentsFallsBackToCacheOnFailure(t *testing.T) {
+	setupHTTPTest(t)
+	if err := db.Conn.SaveBangumiCache(&db.BangumiCache{
+		SubjectID: 101,
+		Comments:  `{"items":[{"comment":"缓存吐槽"}],"total":1}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream down", http.StatusBadGateway)
+	}))
+	defer apiServer.Close()
+	oldBase := bgmtv.APIBase
+	bgmtv.APIBase = apiServer.URL
+	defer func() { bgmtv.APIBase = oldBase }()
+
+	server := httptest.NewServer(Handler())
+	defer server.Close()
+
+	resp := request(t, server, http.MethodGet, "/api/kazumi/subject/101/comments?refresh=1", nil, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body := decodeJSON(t, resp)
+	items, _ := body["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["comment"] != "缓存吐槽" {
+		t.Fatalf("items = %#v", body["items"])
+	}
+}
+
+func TestKazumiCommentsForcedRefreshBypassesEmptyLocalCache(t *testing.T) {
+	setupHTTPTest(t)
+	if err := db.Conn.SaveBangumiCache(&db.BangumiCache{SubjectID: 303, Comments: `{"items":[],"total":0}`}); err != nil {
+		t.Fatal(err)
+	}
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"list":  []map[string]any{{"comment": "重新加载的吐槽"}},
+			"total": 1,
+		})
+	}))
+	defer apiServer.Close()
+	oldBase := bgmtv.APIBase
+	bgmtv.APIBase = apiServer.URL
+	defer func() { bgmtv.APIBase = oldBase }()
+
+	server := httptest.NewServer(Handler())
+	defer server.Close()
+
+	// The retry button sends local=1&refresh=1; refresh must bypass the empty
+	// local cache instead of returning an empty page again.
+	resp := request(t, server, http.MethodGet, "/api/kazumi/subject/303/comments?local=1&refresh=1", nil, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body := decodeJSON(t, resp)
+	items, _ := body["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["comment"] != "重新加载的吐槽" {
+		t.Fatalf("items = %#v", body["items"])
+	}
+}
+
+func TestKazumiCommentsForcedRefreshDoesNotFallBackToEmptyCache(t *testing.T) {
+	setupHTTPTest(t)
+	if err := db.Conn.SaveBangumiCache(&db.BangumiCache{SubjectID: 304, Comments: `{"items":[],"total":0}`}); err != nil {
+		t.Fatal(err)
+	}
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream down", http.StatusBadGateway)
+	}))
+	defer apiServer.Close()
+	oldBase := bgmtv.APIBase
+	bgmtv.APIBase = apiServer.URL
+	defer func() { bgmtv.APIBase = oldBase }()
+
+	server := httptest.NewServer(Handler())
+	defer server.Close()
+
+	resp := request(t, server, http.MethodGet, "/api/kazumi/subject/304/comments?refresh=1", nil, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body := decodeJSON(t, resp)
+	if body["unavailable"] != true {
+		t.Fatalf("body = %#v", body)
+	}
+}
+
+func TestDownloadAndBrowseExportImportEndpoints(t *testing.T) {
+	setupHTTPTest(t)
+	server := httptest.NewServer(Handler())
+	defer server.Close()
+
+	resp := request(t, server, http.MethodGet, "/api/admin/kazumi/downloads/export", nil, testToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("download export status = %d", resp.StatusCode)
+	}
+	if contentType := resp.Header.Get("Content-Type"); !strings.Contains(contentType, "zip") {
+		t.Fatalf("download export content type = %q", contentType)
+	}
+	exported, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := zip.NewReader(bytes.NewReader(exported), int64(len(exported))); err != nil {
+		t.Fatalf("download export is not a zip: %v", err)
+	}
+
+	downloadZip := makeTestZip(t, map[string]string{
+		"manifest.json":    `{"version":1,"tasks":[{"name":"测试番剧","episode":1,"path":"测试番剧/1.mp4","status":2}]}`,
+		"media/测试番剧/1.mp4": "video-data",
+	})
+	resp = requestRaw(t, server, http.MethodPost, "/api/admin/kazumi/downloads/import", downloadZip, "application/zip", testToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("download import status = %d", resp.StatusCode)
+	}
+	imported := decodeJSON(t, resp)
+	result, _ := imported["result"].(map[string]any)
+	if fmt.Sprint(result["imported"]) != "1" || fmt.Sprint(result["media"]) != "1" {
+		t.Fatalf("download import result = %#v", imported)
+	}
+	media, err := os.ReadFile(filepath.Join(config.Cfg.SavePath, "kazumi", "测试番剧", "1.mp4"))
+	if err != nil || string(media) != "video-data" {
+		t.Fatalf("imported media = %q, err = %v", media, err)
+	}
+
+	resp = request(t, server, http.MethodGet, "/api/admin/kazumi/browse/export", nil, testToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("browse export status = %d", resp.StatusCode)
+	}
+	browseZip, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := zip.NewReader(bytes.NewReader(browseZip), int64(len(browseZip))); err != nil {
+		t.Fatalf("browse export is not a zip: %v", err)
+	}
+
+	importZip := makeTestZip(t, map[string]string{
+		"manifest.json": `{"version":1,"timeline":[],"recommend":{"recommend_test.json":[]}}`,
+	})
+	resp = requestRaw(t, server, http.MethodPost, "/api/admin/kazumi/browse/import", importZip, "application/zip", testToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("browse import status = %d", resp.StatusCode)
+	}
+	browse := decodeJSON(t, resp)
+	browseResult, _ := browse["result"].(map[string]any)
+	if browseResult["timeline"] != true || fmt.Sprint(browseResult["recommend"]) != "1" {
+		t.Fatalf("browse import result = %#v", browse)
+	}
+}
+
+func TestFollowBundleExportImportEndpoints(t *testing.T) {
+	setupHTTPTest(t)
+	server := httptest.NewServer(Handler())
+	defer server.Close()
+
+	resp := request(t, server, http.MethodGet, "/api/admin/bangumi/export/bundle", nil, testToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("follow bundle export status = %d", resp.StatusCode)
+	}
+	exported, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := zip.NewReader(bytes.NewReader(exported), int64(len(exported))); err != nil {
+		t.Fatalf("follow bundle export is not a zip: %v", err)
+	}
+
+	bundle := makeTestZip(t, map[string]string{
+		"manifest.json": `{"version":1,"items":[]}`,
+	})
+	resp = requestRaw(t, server, http.MethodPost, "/api/admin/bangumi/import/bundle", bundle, "application/zip", testToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("follow bundle import status = %d", resp.StatusCode)
+	}
+	imported := decodeJSON(t, resp)
+	result, _ := imported["result"].(map[string]any)
+	if fmt.Sprint(result["imported"]) != "0" {
+		t.Fatalf("follow bundle import result = %#v", imported)
 	}
 }

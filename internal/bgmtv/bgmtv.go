@@ -23,6 +23,12 @@ import (
 // APIBase can be overridden in tests.
 var APIBase = "https://api.bgm.tv"
 
+// publicNextMirror is a public next.bgm.tv mirror used as a last-resort
+// fallback. In many networks api.bgm.tv / next.bgm.tv are unreachable, and
+// the signed Kazumi mirror rejects public comment requests, so without this
+// fallback the 吐槽 tab can never load.
+var publicNextMirror = "https://next.bangumi.lat"
+
 const userAgent = "uani/1.0.0 (https://github.com/HanamiSakiP/u-ani)"
 
 var (
@@ -51,7 +57,7 @@ func (images *Images) UnmarshalJSON(data []byte) error {
 		if err := json.Unmarshal(data, &value); err != nil {
 			return err
 		}
-		images.Large = value
+		images.Large = normalizeImageHost(value)
 		return nil
 	}
 	var raw map[string]json.RawMessage
@@ -71,12 +77,25 @@ func (images *Images) UnmarshalJSON(data []byte) error {
 		}
 		return ""
 	}
-	images.Large = pick("large", "Large", "original", "image", "cover", "url")
-	images.Common = pick("common", "Common")
-	images.Medium = pick("medium", "Medium")
-	images.Small = pick("small", "Small")
-	images.Grid = pick("grid", "Grid", "thumbnail")
+	images.Large = normalizeImageHost(pick("large", "Large", "original", "image", "cover", "url"))
+	images.Common = normalizeImageHost(pick("common", "Common"))
+	images.Medium = normalizeImageHost(pick("medium", "Medium"))
+	images.Small = normalizeImageHost(pick("small", "Small"))
+	images.Grid = normalizeImageHost(pick("grid", "Grid", "thumbnail"))
 	return nil
+}
+
+// normalizeImageHost rewrites cover URLs served by the next API mirror to the
+// official Bangumi image host so the existing image proxy and acceleration
+// settings keep working.
+func normalizeImageHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	for _, prefix := range []string{"https://lain.bangumi.lat/", "http://lain.bangumi.lat/"} {
+		if strings.HasPrefix(raw, prefix) {
+			return "https://lain.bgm.tv/" + strings.TrimPrefix(raw, prefix)
+		}
+	}
+	return raw
 }
 
 // Infobox is one infobox entry. Its value can be a string, an object or a
@@ -763,6 +782,7 @@ func FetchComments(id, offset, limit int) (*CommentPage, error) {
 			add(fmt.Sprintf("%s/p1/subjects/%d/comments?limit=%d&offset=%d", mirror, id, limit, offset))
 			add(fmt.Sprintf("%s/comments/%d?limit=%d&offset=%d", mirror, id, limit, offset))
 		}
+		add(fmt.Sprintf("%s/p1/subjects/%d/comments?limit=%d&offset=%d", strings.TrimRight(publicNextMirror, "/"), id, limit, offset))
 	} else {
 		add(commentsAPIURL(id, offset, limit))
 		add(fmt.Sprintf("%s/p1/subjects/%d/comments?limit=%d&offset=%d", strings.TrimRight(APIBase, "/"), id, limit, offset))
@@ -1409,28 +1429,43 @@ func SearchSubjects(keyword string, limit int) ([]Subject, error) {
 			results <- result{subjects: subjects, err: err}
 		}()
 	}
-	timer := time.NewTimer(7 * time.Second)
+	timer := time.NewTimer(6 * time.Second)
 	defer timer.Stop()
 	var lastErr error
 	var fallback []Subject
+	// Once any mirror returns usable results, don't keep the user waiting for
+	// slow mirrors just to find a cover. A short grace period lets a fast
+	// cover-bearing response win without turning every coverless result into
+	// a multi-second wait.
+	var coverGrace *time.Timer
+	var coverGraceC <-chan time.Time
+	defer func() {
+		if coverGrace != nil {
+			coverGrace.Stop()
+		}
+	}()
 	for range jobs {
 		select {
 		case item := <-results:
 			if item.err == nil && len(item.subjects) > 0 {
-				// A fast mirror may return names without covers. Keep waiting
-				// briefly for a source that includes images so search result
+				// A fast mirror may return names without covers. Wait only a
+				// moment for a source that includes images so search result
 				// cards render correctly.
 				if subjectsHaveCovers(item.subjects) {
 					return item.subjects, nil
 				}
 				if fallback == nil {
 					fallback = item.subjects
+					coverGrace = time.NewTimer(400 * time.Millisecond)
+					coverGraceC = coverGrace.C
 				}
 				continue
 			}
 			if item.err != nil {
 				lastErr = item.err
 			}
+		case <-coverGraceC:
+			return fallback, nil
 		case <-timer.C:
 			if fallback != nil {
 				return fallback, nil

@@ -272,6 +272,12 @@ func resolvePlaybackURL(rule *Rule, pageURL string, depth int, visited map[strin
 	if depth > 2 || visited[pageURL] {
 		return "", false, "", nil
 	}
+	// API rules sometimes return the media file itself as the episode URL.
+	// Treating it as an HTML page would try to download/fetch the whole video
+	// and end with "no playable URL"; hand it straight to the player instead.
+	if IsMediaURL(pageURL) {
+		return pageURL, true, "", nil
+	}
 	visited[pageURL] = true
 	headers := ruleHeaders(rule)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

@@ -417,11 +417,31 @@ func migrateWebDAVDirection() bool {
 }
 
 func migrateBangumiMirrors() bool {
+	changed := false
 	if len(Cfg.Kazumi.BangumiMirrors) == 0 && strings.TrimSpace(Cfg.Kazumi.BangumiMirror) != "" {
 		Cfg.Kazumi.BangumiMirrors = []string{strings.TrimRight(strings.TrimSpace(Cfg.Kazumi.BangumiMirror), "/")}
-		return true
+		changed = true
 	}
-	return false
+	// Upgrade the historical built-in mirror list to use next.bangumi.lat as
+	// the default p1 source. Only touch the exact legacy defaults so custom
+	// lists keep their order.
+	const (
+		legacyDetail = "https://api.kazumi.fyi"
+		legacyAuth   = "https://api.bgmapi.com"
+		nextMirror   = "https://next.bangumi.lat"
+	)
+	mirrors := Cfg.Kazumi.BangumiMirrors
+	legacyDefault := (len(mirrors) == 2 && mirrors[0] == legacyDetail && mirrors[1] == legacyAuth) ||
+		(len(mirrors) == 1 && mirrors[0] == legacyDetail)
+	if legacyDefault {
+		Cfg.Kazumi.BangumiMirrors = append([]string{nextMirror}, mirrors...)
+		active := strings.TrimRight(strings.TrimSpace(Cfg.Kazumi.BangumiMirror), "/")
+		if active == "" || active == legacyDetail {
+			Cfg.Kazumi.BangumiMirror = nextMirror
+		}
+		changed = true
+	}
+	return changed
 }
 
 func migrateBangumiSyncTypes() bool {

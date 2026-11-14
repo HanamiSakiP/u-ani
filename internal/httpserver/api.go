@@ -664,6 +664,10 @@ func adminRouter(w http.ResponseWriter, r *http.Request, path string) {
 		adminSeenChange(w, r, true)
 	case r.Method == http.MethodPost && path == "seen_mark":
 		adminSeenChange(w, r, false)
+	case r.Method == http.MethodGet && path == "cache/export":
+		adminCacheExport(w, r)
+	case r.Method == http.MethodPost && path == "cache/import":
+		adminCacheImport(w, r)
 	case strings.HasPrefix(path, "bangumi/"):
 		adminBangumiRouter(w, r, strings.TrimPrefix(path, "bangumi/"))
 	case strings.HasPrefix(path, "webdav"):

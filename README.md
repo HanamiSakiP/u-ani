@@ -232,7 +232,7 @@ uani kazumi mirror --test https://api.bgmapi.com
 ```
 
 - 搜索会优先使用当前镜像，并并发尝试其他已配置镜像和内置 `https://api.bgmapi.com` 兜底。
-- 吐槽、详情等接口也会优先使用当前镜像；如果镜像要求应用签名或不可用，会在详情页显示明确提示。
+- 默认使用 `https://next.bangumi.lat` 作为 p1 接口（时间表、详情、吐槽）的镜像源；`v0` 角色 / 关联和搜索会自动回退到 `https://api.kazumi.fyi` 等兼容镜像。吐槽额外保留公共兜底，所有来源都不可用时会返回可重试的「暂不可用」状态，而不是让页面直接报错。
 - 设置页和 Kazumi Files → 网络设置中同样可以添加、删除、测试和切换镜像；全部删除后恢复内置默认镜像。
 
 HTTP 管理 API 提供 `/api/admin/kazumi/catalog`、`/api/admin/kazumi/rules`、`/api/admin/kazumi/rules/update`、`/api/admin/kazumi/settings`；MCP 新增 `kazumi_catalog`、`kazumi_list`、`kazumi_install`、`kazumi_update`、`kazumi_remove`、`kazumi_get_network`、`kazumi_set_network`。
@@ -284,11 +284,11 @@ uani kazumi download --rule AGE --name "葬送的芙莉莲" -e 1 --source "https
 
 前端已重写为内置的轻量单页应用，启动 HTTP 服务后直接访问 `/` 即可，无需安装或构建。界面已适配手机端：侧边栏抽屉、顶部操作区自动换行、卡片两列布局，详情弹窗和设置表单在窄屏下自动收敛为单列，并处理了刘海屏安全区域。主要功能：
 
-- **追番**：按 Bangumi 收藏状态筛选（全部 / 在看 / 想看 / 搁置 / 看过 / 抛弃）；**已缓存** 只显示 Kazumi Files 中确实有已完成视频的番剧；卡片显示实际已下载集数，点击 **开始观看** 直接播放本地剧集，不再先搜索在线来源；支持名称搜索、更新检查、添加 / 删除订阅、**更新追番完整信息**（概述 / 角色 / 关联 / 制作人员 / 吐槽文字缓存，图片仅缓存封面、角色和关联）、**追番信息本地导入 / 导出**（导出包含已缓存的完整详情）；
+- **追番**：按 Bangumi 收藏状态筛选（全部 / 在看 / 想看 / 搁置 / 看过 / 抛弃）；**已缓存** 只显示 Kazumi Files 中确实有已完成视频的番剧；卡片显示实际已下载集数，点击 **开始观看** 直接播放本地剧集，不再先搜索在线来源；支持名称搜索、更新检查、添加 / 删除订阅、**更新追番完整信息**（概述 / 角色 / 关联 / 制作人员 / 吐槽文字缓存，图片仅缓存封面、角色和关联）、**追番信息本地导入 / 导出**（可选择仅 JSON，或导出含已缓存封面和番剧文字信息的 ZIP；导入时自动识别 JSON / ZIP）、**下载库导入 / 导出**（导出为 ZIP 压缩包，内含真实视频文件、已缓存封面和番剧信息；导入时会补全缺失的已下载追番条目）、**缓存本地导出 / 导入**（番剧详情与吐槽文字，以及 Kazumi 时间表 / 推荐缓存；不修改追番、订阅和已下载文件）；
 - **放送日历**：按星期展示当季番剧；
-- **Kazumi 时间表**：Bangumi 当季番剧放送时间表，可按星期切换，点击卡片查看详情；切换星期直接使用本地缓存；
+- **Kazumi 时间表**：Bangumi 当季番剧放送时间表，可按星期切换，点击卡片查看详情；切换星期直接使用本地缓存；支持时间表 / 推荐缓存的单独 **导出 / 导入**（ZIP 压缩包，含已缓存封面和番剧文字信息）；
 - **Kazumi 推荐**：与原版一致的「热门番组 + 日常 / 原创 / 校园 / 搞笑 / 奇幻 / 百合 / 恋爱 / 悬疑 / 热血 / 后宫 / 机战 / 轻改 / 偶像 / 治愈 / 异世界」分类；搜索会查询 Bangumi 全站，返回后立即预加载结果封面，在线搜索不可用时回退本地时间表匹配并提示；**更新缓存**会同时预取所有分类，进入推荐页也会后台预热其余分类，之后切换分类无需等待网络；封面统一走图片代理并自动在加速模式与镜像之间快速切换；
-- **Kazumi Files**：下载任务、媒体文件、已安装规则、规则仓库、网络设置、规则文件查看 / 编辑；
+- **Kazumi Files**：下载任务按番剧合并显示，带封面、进度状态汇总和可折叠的剧集列表；媒体文件按同名番剧合并，点击展开选集后播放 / 打开 / 删除；另含已安装规则、规则仓库、网络设置、规则文件查看 / 编辑；
 - **设置**：管理令牌、运行信息，以及合并为单一面板的「同步与镜像源」；面板内通过按钮切换 **Bangumi 同步 / WebDAV 同步 / 镜像源**，镜像可添加、删除、测试并切换当前使用。
 
 详情弹窗和图片预览都会限制在视口内，图片使用自适应缩放，不需要左右滚动条。图片预览支持「上一张 / 下一张」按钮，也可以使用键盘左右方向键切换。详情页支持通过按钮切换：
@@ -345,7 +345,7 @@ bangumi_mirrors = [
 ]
 ```
 
-搜索、详情和吐槽会优先使用当前镜像，并在失败时并发尝试其余镜像；内置的 `https://api.bgmapi.com` 提供无需签名的 v0 搜索兜底。镜像测试会同时检查 `/p1/calendar`、旧版搜索和 `/v0/subjects/253`，避免把返回 HTTP 200 错误 JSON 的地址误判为可用。
+搜索、详情和吐槽会优先使用当前镜像，并在失败时并发尝试其余镜像；默认镜像列表为 `https://next.bangumi.lat`（p1 时间表 / 详情 / 吐槽）、`https://api.kazumi.fyi`（v0 角色 / 关联 / 推荐）和 `https://api.bgmapi.com`（无需签名的 v0 搜索结果兜底）。不支持的路径会自动切换到兼容镜像。镜像测试会同时检查 `/p1/calendar`、旧版搜索和 `/v0/subjects/253`，避免把返回 HTTP 200 错误 JSON 的地址误判为可用。
 
 ## 数据源
 
@@ -423,6 +423,10 @@ uani cover
 - Kazumi 浏览 API：`/api/kazumi/timeline`、`/api/kazumi/recommend`、`/api/kazumi/recommend/all`、`/api/kazumi/subject/<id>`
 - 番剧详情 API：`/api/kazumi/lookup`、`/api/kazumi/subject/<id>/{characters|staff|relations|comments}`
 - 收藏状态 API：`GET /api/admin/bangumi/collection/<id>`、`POST /api/admin/bangumi/collection`、`POST /api/admin/bangumi/link`
+- 缓存导入 / 导出 API：`GET /api/admin/cache/export`、`POST /api/admin/cache/import`（别名：`/api/admin/bangumi/cache/{export|import}`、`/api/admin/kazumi/cache/{export|import}`）
+- 下载库导入 / 导出 API：`GET /api/admin/kazumi/downloads/export`、`POST /api/admin/kazumi/downloads/import`（ZIP：真实视频文件 + 已缓存封面 + 番剧信息 + 下载记录）
+- 追番备份 API：`GET /api/admin/bangumi/export/bundle`、`POST /api/admin/bangumi/import/bundle`（ZIP：追番列表 + 已缓存封面 + 番剧文字信息）
+- Kazumi 浏览缓存 API：`GET /api/admin/kazumi/browse/export`、`POST /api/admin/kazumi/browse/import`（ZIP：时间表 / 推荐缓存 + 已缓存封面 + 番剧文字信息）
 - 管理 API：`/api/admin/*`，需要 `Authorization: Bearer <admin_token>`
 - 日历订阅：`/resource/calendar.ics`
 - MCP：`POST /mcp`（Streamable HTTP）、`GET /mcp/sse`、`POST /mcp/messages`
@@ -473,8 +477,8 @@ danmaku_api_url = ""
 [kazumi]
 rule_repository = ""                 # 空值表示官方 KazumiRules 仓库
 bangumi_acceleration = "mirror"      # direct / ech / mirror
-bangumi_mirror = "https://api.kazumi.fyi"   # 当前使用的 Bangumi 镜像
-bangumi_mirrors = ["https://api.kazumi.fyi", "https://api.bgmapi.com"]
+bangumi_mirror = "https://next.bangumi.lat"   # 当前使用的 Bangumi 镜像（p1 默认）
+bangumi_mirrors = ["https://next.bangumi.lat", "https://api.kazumi.fyi", "https://api.bgmapi.com"]
 rules_mirror = "ghProxy"             # ghProxy / ghfast / gitcode / direct
 image_acceleration = "ech"           # direct / ech / mirror
 
@@ -514,7 +518,7 @@ go test ./...
 go vet ./...
 ```
 
-测试覆盖配置自动初始化、剧集/季度解析、数据源 HTML/XML 解析、控制器、数据库迁移、路径格式化、Kazumi 规则仓库/加速、Kazumi XPath/API 规则解析、Bangumi 剧情详情/角色/制作人员/关联缓存、收藏状态切换、内置 Web UI、Bangumi 追番同步，以及可选的 Python 脚本兼容（无 Python 时自动跳过）。
+测试覆盖配置自动初始化、剧集/季度解析、数据源 HTML/XML 解析、控制器、数据库迁移、路径格式化、Kazumi 规则仓库/加速、Kazumi XPath/API 规则解析、Bangumi 剧情详情/角色/制作人员/关联缓存、缓存导入/导出、追番备份、下载库导入/导出、Kazumi 媒体文件元数据、收藏状态切换、内置 Web UI、Bangumi 追番同步，以及可选的 Python 脚本兼容（无 Python 时自动跳过）。
 
 ## 与上游的说明
 

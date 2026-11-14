@@ -168,3 +168,65 @@ func TestKazumiVideosForNames(t *testing.T) {
 		t.Fatal("failed task must not be returned as a downloaded video")
 	}
 }
+
+func TestListKazumiFilesEnrichesMetadata(t *testing.T) {
+	setupControllersDB(t)
+	oldSavePath, oldCachePath := config.Cfg.SavePath, config.Cfg.CachePath
+	config.Cfg.SavePath = t.TempDir()
+	config.Cfg.CachePath = t.TempDir()
+	defer func() {
+		config.Cfg.SavePath = oldSavePath
+		config.Cfg.CachePath = oldCachePath
+	}()
+
+	if err := db.Conn.SaveKazumiDownload(&db.KazumiDownload{
+		Name: "测试番剧", BangumiID: 101, Episode: 1, Title: "第一话",
+		Path: "测试番剧/1.mp4", Status: db.KazumiDownloadDone,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Conn.SaveBangumiCache(&db.BangumiCache{
+		SubjectID: 101,
+		Overview:  `{"name":"测试番剧","cover":"/covers/test.jpg"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Conn.SaveFollowed(&db.Followed{
+		BangumiName: "测试番剧",
+		DisplayName: "测试番剧 第二季",
+		Status:      db.FollowedStatusFollowed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"测试番剧/1.mp4", "旧番/02.mp4"} {
+		path := filepath.Join(KazumiFilesDir(), filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("video"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files, err := ListKazumiFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("files = %#v", files)
+	}
+	byPath := map[string]KazumiFile{}
+	for _, file := range files {
+		byPath[file.Path] = file
+	}
+	enriched := byPath["测试番剧/1.mp4"]
+	if enriched.BangumiName != "测试番剧" || enriched.DisplayName != "测试番剧 第二季" ||
+		enriched.BangumiID != 101 || enriched.Episode != 1 || enriched.Title != "第一话" ||
+		enriched.Cover != "/covers/test.jpg" {
+		t.Fatalf("enriched = %#v", enriched)
+	}
+	legacy := byPath["旧番/02.mp4"]
+	if legacy.BangumiName != "旧番" || legacy.Episode != 2 || legacy.Cover != "" {
+		t.Fatalf("legacy = %#v", legacy)
+	}
+}

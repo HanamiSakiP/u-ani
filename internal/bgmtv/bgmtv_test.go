@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseSubjectID(t *testing.T) {
@@ -434,6 +435,7 @@ func TestImagesUnmarshalShapes(t *testing.T) {
 		"object": `{"large":"https://lain.bgm.tv/l.jpg","medium":"https://lain.bgm.tv/m.jpg"}`,
 		"string": `"https://lain.bgm.tv/s.jpg"`,
 		"alias":  `{"image":"https://lain.bgm.tv/i.jpg"}`,
+		"mirror": `{"large":"https://lain.bangumi.lat/next/c.jpg"}`,
 	}
 	for name, raw := range cases {
 		var images Images
@@ -443,6 +445,10 @@ func TestImagesUnmarshalShapes(t *testing.T) {
 		if images.Large == "" {
 			t.Fatalf("%s: images = %#v", name, images)
 		}
+	}
+	mirror := Images{Large: "https://lain.bangumi.lat/pic/cover/l/x.jpg"}
+	if got := normalizeImageHost(mirror.Large); got != "https://lain.bgm.tv/pic/cover/l/x.jpg" {
+		t.Fatalf("normalizeImageHost = %q", got)
 	}
 }
 
@@ -474,5 +480,44 @@ func TestSearchSubjectsPrefersResultsWithCovers(t *testing.T) {
 	}
 	if len(subjects) != 1 || subjects[0].CoverURL() == "" {
 		t.Fatalf("subjects = %#v", subjects)
+	}
+}
+
+func TestSearchSubjectsReturnsCoverlessFallbackAfterGrace(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v0/search/subjects":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{{"id": 1, "name": "Fast No Cover"}},
+			})
+		case strings.HasPrefix(r.URL.Path, "/search/subject/"):
+			// Simulate a slow mirror. It must not delay the coverless result
+			// beyond the short grace period.
+			<-release
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"list": []map[string]any{{"id": 2, "name": "Slow No Cover"}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+	oldBase := APIBase
+	APIBase = server.URL
+	defer func() { APIBase = oldBase }()
+
+	start := time.Now()
+	subjects, err := SearchSubjects("test", 5)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) != 1 || subjects[0].ID != 1 {
+		t.Fatalf("subjects = %#v", subjects)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("coverless fallback took %s, want fast return", elapsed)
 	}
 }

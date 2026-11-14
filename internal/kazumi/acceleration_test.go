@@ -3,6 +3,8 @@ package kazumi
 import (
 	"strings"
 	"testing"
+
+	"github.com/HanamiSakiP/u-ani/internal/config"
 )
 
 func TestNormalizeRuleRepository(t *testing.T) {
@@ -136,5 +138,33 @@ func TestApplyImageURL(t *testing.T) {
 	}
 	if IsBangumiImage(other) {
 		t.Error("did not expect example.com to be a Bangumi image")
+	}
+}
+
+func TestNextMirrorIsDefaultForP1(t *testing.T) {
+	old := config.Cfg.Kazumi
+	defer func() { config.Cfg.Kazumi = old }()
+	config.Cfg.Kazumi = config.KazumiConfig{}
+
+	mirrors := BangumiMirrors()
+	if len(mirrors) == 0 || mirrors[0] != nextBangumiMirror {
+		t.Fatalf("default mirrors = %#v, want next.bangumi.lat first", mirrors)
+	}
+	if got := ActiveBangumiMirror(); got != nextBangumiMirror {
+		t.Fatalf("active mirror = %q, want %q", got, nextBangumiMirror)
+	}
+	if got := ApplyBangumiURL("https://next.bgm.tv/p1/calendar", BangumiAccelerationMirror); got != nextBangumiMirror+"/p1/calendar" {
+		t.Fatalf("p1 URL = %q", got)
+	}
+	if got := ApplyBangumiURL("https://api.bgm.tv/v0/subjects/253", BangumiAccelerationMirror); got != bangumiMirrorDomain+"/v0/subjects/253" {
+		t.Fatalf("v0 URL = %q, want detail mirror fallback", got)
+	}
+	if got := ApplyBangumiURL("https://api.bgm.tv/kazumi/v1/popular/subjects", BangumiAccelerationMirror); got != bangumiMirrorDomain+"/kazumi/v1/popular/subjects" {
+		t.Fatalf("kazumi URL = %q, want detail mirror fallback", got)
+	}
+	for _, mirror := range BangumiSearchMirrors() {
+		if mirror == nextBangumiMirror {
+			t.Fatalf("search mirrors must skip next.bangumi.lat: %#v", BangumiSearchMirrors())
+		}
 	}
 }

@@ -1,12 +1,14 @@
 package controllers
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/HanamiSakiP/u-ani/internal/db"
+	"github.com/HanamiSakiP/u-ani/internal/model"
 )
 
 // FollowExport is the local import/export snapshot for followed bangumi.
@@ -135,6 +137,12 @@ func ImportFollows(snapshot FollowExport) (map[string]any, error) {
 			}
 			continue
 		}
+		if item.Cache != nil {
+			if importedFollow, err := importFollowFromCache(item); err == nil && importedFollow {
+				imported++
+				continue
+			}
+		}
 		episode := item.Episode
 		var result Result
 		if item.BangumiID > 0 {
@@ -154,4 +162,69 @@ func ImportFollows(snapshot FollowExport) (map[string]any, error) {
 // FollowExportMessage formats the import result.
 func FollowExportMessage(result map[string]any) string {
 	return fmt.Sprintf("追番导入完成：新增 %v，更新 %v，失败 %v", result["imported"], result["updated"], result["failed"])
+}
+
+// importFollowFromCache recreates a subscription entirely from the exported
+// follow item and its cached subject overview. This keeps JSON/ZIP imports
+// working offline instead of requiring another bgm.tv lookup.
+func importFollowFromCache(item FollowExportItem) (bool, error) {
+	name := strings.TrimSpace(item.Name)
+	if name == "" {
+		return false, nil
+	}
+	bangumiID := "follow:" + name
+	if item.BangumiID > 0 {
+		bangumiID = "bgmtv:" + strconv.Itoa(item.BangumiID)
+	}
+	if _, err := db.Conn.GetBangumiByName(name); err == db.ErrNotFound {
+		cover := ""
+		if item.Cache != nil && item.Cache.Overview != "" {
+			var payload struct {
+				Cover string `json:"cover"`
+			}
+			if json.Unmarshal([]byte(item.Cache.Overview), &payload) == nil {
+				cover = downloadCoverField(kazumiCoverPath(payload.Cover))
+			}
+		}
+		if err := db.Conn.SaveBangumi(model.WebsiteBangumi{
+			ID: bangumiID, Name: name, Status: db.BangumiStatusUpdating,
+			UpdateDay: "Unknown", Cover: cover,
+			SubtitleGroup: []model.SubtitleGroup{},
+		}); err != nil {
+			return false, err
+		}
+	} else if err != nil {
+		return false, err
+	}
+	if item.BangumiID > 0 {
+		_ = db.Conn.SaveBangumiLink(name, item.BangumiID)
+		if item.CollectionType >= 1 && item.CollectionType <= 5 {
+			_ = db.Conn.SaveBangumiCollection(item.BangumiID, item.CollectionType)
+		}
+	}
+	for _, alias := range item.Aliases {
+		if alias = strings.TrimSpace(alias); alias != "" {
+			_ = db.Conn.SaveCustomAlias(name, alias)
+		}
+	}
+	season := item.Season
+	if season <= 0 {
+		season = 1
+	}
+	followed := &db.Followed{
+		BangumiName:   name,
+		Episodes:      map[int]bool{},
+		Status:        db.FollowedStatusFollowed,
+		UpdatedTime:   time.Now().Unix(),
+		Season:        season,
+		EpisodeOffset: item.EpisodeOffset,
+		DisplayName:   item.DisplayName,
+	}
+	for episode := 1; episode <= item.Episode; episode++ {
+		followed.Episodes[episode] = true
+	}
+	if err := db.Conn.SaveFollowed(followed); err != nil {
+		return false, err
+	}
+	return true, nil
 }

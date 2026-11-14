@@ -28,8 +28,16 @@ func adminBangumiRouter(w http.ResponseWriter, r *http.Request, path string) {
 		adminBangumiExport(w, r)
 	case r.Method == http.MethodPost && path == "import":
 		adminBangumiImport(w, r)
+	case r.Method == http.MethodGet && path == "export/bundle":
+		adminFollowExportBundle(w, r)
+	case r.Method == http.MethodPost && path == "import/bundle":
+		adminFollowImportBundle(w, r)
 	case r.Method == http.MethodPost && path == "cache":
 		adminBangumiCache(w, r)
+	case r.Method == http.MethodGet && path == "cache/export":
+		adminCacheExport(w, r)
+	case r.Method == http.MethodPost && path == "cache/import":
+		adminCacheImport(w, r)
 	case r.Method == http.MethodPost && path == "cache/clear":
 		if err := controllers.ClearBangumiDetailCache(); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())

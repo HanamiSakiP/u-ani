@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"github.com/HanamiSakiP/u-ani/internal/db"
 	"github.com/HanamiSakiP/u-ani/internal/httpx"
 	"github.com/HanamiSakiP/u-ani/internal/kazumi"
+	"github.com/HanamiSakiP/u-ani/internal/utils"
 )
 
 // KazumiDownloadOptions requests one streaming episode download.
@@ -34,10 +36,16 @@ type KazumiDownloadOptions struct {
 
 // KazumiFile is one downloaded media file.
 type KazumiFile struct {
-	Name     string `json:"name"`
-	Path     string `json:"path"`
-	Size     int64  `json:"size"`
-	Modified int64  `json:"modified"`
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	Size        int64  `json:"size"`
+	Modified    int64  `json:"modified"`
+	Title       string `json:"title,omitempty"`
+	BangumiName string `json:"bangumi_name,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	BangumiID   int    `json:"bangumi_id,omitempty"`
+	Episode     int    `json:"episode,omitempty"`
+	Cover       string `json:"cover,omitempty"`
 }
 
 var (
@@ -217,6 +225,7 @@ func ListKazumiDownloads() ([]db.KazumiDownload, error) {
 			}
 		}
 	}
+	enrichKazumiDownloadTasks(tasks)
 	return tasks, nil
 }
 
@@ -258,7 +267,188 @@ func ListKazumiFiles() ([]KazumiFile, error) {
 		return nil, err
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Modified > out[j].Modified })
+	enrichKazumiFiles(out)
 	return out, nil
+}
+
+// enrichKazumiFiles adds the bangumi title, episode number and cover from
+// completed download tasks so the Kazumi Files page can render a useful card
+// instead of only showing an opaque file path. Legacy files without a task
+// still get a best-effort title from their directory name.
+func enrichKazumiFiles(files []KazumiFile) {
+	if len(files) == 0 || db.Conn == nil {
+		return
+	}
+	tasks, err := db.Conn.AllKazumiDownloads()
+	if err != nil {
+		return
+	}
+	byPath := map[string]db.KazumiDownload{}
+	byEpisode := map[string]db.KazumiDownload{}
+	for _, task := range tasks {
+		if task.Path == "" {
+			continue
+		}
+		key := filepath.ToSlash(strings.TrimPrefix(filepath.Clean(filepath.FromSlash(task.Path)), "/"))
+		byPath[key] = task
+		byEpisode[strings.TrimSpace(task.Name)+"\x00"+strconv.Itoa(task.Episode)] = task
+	}
+	resolver := newKazumiMetaResolver()
+	for i := range files {
+		file := &files[i]
+		rel := filepath.ToSlash(strings.TrimPrefix(filepath.Clean(filepath.FromSlash(file.Path)), "/"))
+		task, ok := byPath[rel]
+		if !ok {
+			folder := firstPathSegment(rel)
+			episode := episodeFromFileName(file.Name)
+			task = byEpisode[strings.TrimSpace(folder)+"\x00"+strconv.Itoa(episode)]
+			if task.Name == "" {
+				task = db.KazumiDownload{Name: folder, Episode: episode}
+			}
+		}
+		if task.Name != "" {
+			file.BangumiName = task.Name
+		}
+		if file.BangumiName == "" {
+			file.BangumiName = firstPathSegment(rel)
+		}
+		if task.Episode > 0 {
+			file.Episode = task.Episode
+		} else if file.Episode == 0 {
+			file.Episode = episodeFromFileName(file.Name)
+		}
+		if task.Title != "" {
+			file.Title = task.Title
+		}
+		if task.BangumiID > 0 {
+			file.BangumiID = task.BangumiID
+		}
+		file.DisplayName = resolver.displayName(file.BangumiName)
+		file.Cover = resolver.cover(task, file.BangumiName)
+	}
+}
+
+// enrichKazumiDownloadTasks adds the display name and cover used by the task
+// page. The fields are derived at read time and never persisted.
+func enrichKazumiDownloadTasks(tasks []db.KazumiDownload) {
+	if len(tasks) == 0 || db.Conn == nil {
+		return
+	}
+	resolver := newKazumiMetaResolver()
+	for i := range tasks {
+		tasks[i].DisplayName = resolver.displayName(tasks[i].Name)
+		tasks[i].Cover = resolver.cover(tasks[i], tasks[i].Name)
+	}
+}
+
+// kazumiMetaResolver resolves the display name and cover for download tasks.
+// Repeated lookups for the same subject are cached.
+type kazumiMetaResolver struct {
+	covers map[string]string
+}
+
+func newKazumiMetaResolver() *kazumiMetaResolver {
+	return &kazumiMetaResolver{covers: map[string]string{}}
+}
+
+func (r *kazumiMetaResolver) displayName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || db.Conn == nil {
+		return ""
+	}
+	if followed, err := db.Conn.GetFollowed(name); err == nil {
+		return followed.DisplayName
+	}
+	return ""
+}
+
+func (r *kazumiMetaResolver) cover(task db.KazumiDownload, name string) string {
+	key := fmt.Sprintf("%d\x00%s", task.BangumiID, name)
+	if cover, ok := r.covers[key]; ok {
+		return cover
+	}
+	cover := ""
+	if task.BangumiID > 0 {
+		cover = cachedOverviewCover(int64(task.BangumiID))
+	}
+	if cover == "" && name != "" {
+		if followed, err := db.Conn.GetBangumiByName(name); err == nil {
+			cover = followed.Cover
+		}
+		if cover == "" {
+			if subjectID, err := db.Conn.GetSubjectIDByBangumiName(name); err == nil && subjectID > 0 {
+				cover = cachedOverviewCover(int64(subjectID))
+			}
+		}
+		if cover == "" {
+			if display := r.displayName(name); display != "" {
+				if followed, err := db.Conn.GetBangumiByName(display); err == nil {
+					cover = followed.Cover
+				}
+			}
+		}
+	}
+	cover = kazumiCoverPath(cover)
+	r.covers[key] = cover
+	return cover
+}
+
+func firstPathSegment(path string) string {
+	path = strings.Trim(path, "/")
+	if index := strings.Index(path, "/"); index >= 0 {
+		return path[:index]
+	}
+	return path
+}
+
+func episodeFromFileName(name string) int {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return 0
+	}
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	for i, ch := range base {
+		if ch < '0' || ch > '9' {
+			base = base[:i]
+			break
+		}
+	}
+	value, err := strconv.Atoi(base)
+	if err != nil || value <= 0 {
+		return 0
+	}
+	return value
+}
+
+func cachedOverviewCover(subjectID int64) string {
+	if subjectID <= 0 {
+		return ""
+	}
+	cache, err := db.Conn.GetBangumiCache(subjectID)
+	if err != nil || cache == nil || cache.Overview == "" {
+		return ""
+	}
+	var payload struct {
+		Cover string `json:"cover"`
+	}
+	if json.Unmarshal([]byte(cache.Overview), &payload) != nil {
+		return ""
+	}
+	return payload.Cover
+}
+
+func kazumiCoverPath(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "/covers/") || strings.HasPrefix(raw, "/api/image") {
+		return raw
+	}
+	if _, file := utils.ConvertCoverURLToPath(raw); utils.IsImage(file) {
+		return "/covers/" + utils.NormalizePath(raw)
+	}
+	return raw
 }
 
 // DeleteKazumiFile removes a downloaded file and empty parent directories.
@@ -693,7 +883,7 @@ func RepairKazumiDownloadLinks() {
 	if ensureDB() != nil {
 		return
 	}
-	tasks, err := db.Conn.ListKazumiDownloads(500)
+	tasks, err := db.Conn.AllKazumiDownloads()
 	if err != nil {
 		return
 	}

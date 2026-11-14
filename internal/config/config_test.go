@@ -145,3 +145,33 @@ func TestMigrateLegacyWatchingSyncTypes(t *testing.T) {
 		t.Fatalf("legacy sync types were not migrated: %#v", Cfg.Bangumi.SyncTypes)
 	}
 }
+
+func TestMigrateBangumiMirrorsAddsNextDefault(t *testing.T) {
+	old := Cfg.Kazumi
+	defer func() { Cfg.Kazumi = old }()
+
+	Cfg.Kazumi = KazumiConfig{
+		BangumiMirrors: []string{"https://api.kazumi.fyi", "https://api.bgmapi.com"},
+		BangumiMirror:  "https://api.kazumi.fyi",
+	}
+	if !migrateBangumiMirrors() {
+		t.Fatal("legacy default mirrors should be migrated")
+	}
+	if len(Cfg.Kazumi.BangumiMirrors) != 3 || Cfg.Kazumi.BangumiMirrors[0] != "https://next.bangumi.lat" {
+		t.Fatalf("mirrors = %#v", Cfg.Kazumi.BangumiMirrors)
+	}
+	if Cfg.Kazumi.BangumiMirror != "https://next.bangumi.lat" {
+		t.Fatalf("active mirror = %q", Cfg.Kazumi.BangumiMirror)
+	}
+
+	Cfg.Kazumi = KazumiConfig{
+		BangumiMirrors: []string{"https://example.com"},
+		BangumiMirror:  "https://example.com",
+	}
+	if migrateBangumiMirrors() {
+		t.Fatal("custom mirror list should not be migrated")
+	}
+	if len(Cfg.Kazumi.BangumiMirrors) != 1 || Cfg.Kazumi.BangumiMirrors[0] != "https://example.com" {
+		t.Fatalf("custom mirrors = %#v", Cfg.Kazumi.BangumiMirrors)
+	}
+}

@@ -102,6 +102,10 @@ type KazumiDownload struct {
 	Error       string `json:"error"`
 	CreatedTime int64  `json:"created_time"`
 	UpdatedTime int64  `json:"updated_time"`
+	// DisplayName and Cover are derived at read time; they are not stored in
+	// the database but let the Web UI render a richer task list.
+	DisplayName string `json:"display_name,omitempty"`
+	Cover       string `json:"cover,omitempty"`
 }
 
 type Subtitle struct {
@@ -1194,6 +1198,26 @@ func (d *DB) ListKazumiDownloads(limit int) ([]KazumiDownload, error) {
 	return out, rows.Err()
 }
 
+// AllKazumiDownloads returns every streaming download record without the
+// page-sized limit used by the Web UI. Cache export and task enrichment need
+// the complete library.
+func (d *DB) AllKazumiDownloads() ([]KazumiDownload, error) {
+	rows, err := d.Query("SELECT " + kazumiDownloadColumns + " FROM kazumi_download ORDER BY id DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []KazumiDownload{}
+	for rows.Next() {
+		item, err := scanKazumiDownload(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 // DeleteKazumiDownload removes a streaming download record.
 func (d *DB) DeleteKazumiDownload(id int64) error {
 	_, err := d.Exec("DELETE FROM kazumi_download WHERE id = ?", id)
@@ -1236,6 +1260,25 @@ func (d *DB) GetBangumiCache(subjectID int64) (*BangumiCache, error) {
 		return nil, err
 	}
 	return &item, nil
+}
+
+// ListBangumiCaches returns every cached subject detail row. It is used by
+// cache import/export so complete metadata can be moved between instances.
+func (d *DB) ListBangumiCaches() ([]BangumiCache, error) {
+	rows, err := d.Query("SELECT " + bangumiCacheColumns + " FROM bangumi_cache ORDER BY subject_id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []BangumiCache{}
+	for rows.Next() {
+		item, err := scanBangumiCache(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 // SaveBangumiCache inserts or updates cached subject sections.

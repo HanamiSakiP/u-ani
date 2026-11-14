@@ -26,6 +26,10 @@ const (
 	// client. Rules are stored as-is; this is exposed for clients.
 	APILevel = 9
 
+	// nextBangumiMirror is the public next.bgm.tv-compatible mirror. It serves
+	// p1 endpoints (calendar, subject overview, comments) and is the default
+	// source for those routes.
+	nextBangumiMirror   = "https://next.bangumi.lat"
 	bangumiMirrorDomain = "https://api.kazumi.fyi"
 	// bangumiAuthMirrorDomain is the public v0/legacy API proxy used by
 	// Kazumi for authenticated requests. It also supports full-text search
@@ -402,7 +406,7 @@ func isBangumiImage(u *url.URL) bool {
 	if u == nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return false
 	}
-	if u.Host == "lain.bgm.tv" {
+	if u.Host == "lain.bgm.tv" || u.Host == "lain.bangumi.lat" {
 		return true
 	}
 	if u.Host != "api.bgm.tv" {
@@ -453,7 +457,8 @@ func NormalizeBangumiMirrors(values []string) ([]string, error) {
 	return out, nil
 }
 
-// BangumiMirrors returns the configured mirrors, or the official mirror.
+// BangumiMirrors returns the configured mirrors, or the built-in defaults.
+// next.bangumi.lat comes first so p1 endpoints use it by default.
 func BangumiMirrors() []string {
 	mirrors, err := NormalizeBangumiMirrors(config.Cfg.Kazumi.BangumiMirrors)
 	if err == nil && len(mirrors) > 0 {
@@ -462,7 +467,7 @@ func BangumiMirrors() []string {
 	if mirror, err := NormalizeBangumiMirror(config.Cfg.Kazumi.BangumiMirror); err == nil && mirror != "" {
 		return []string{mirror}
 	}
-	return []string{bangumiMirrorDomain, bangumiAuthMirrorDomain}
+	return []string{nextBangumiMirror, bangumiMirrorDomain, bangumiAuthMirrorDomain}
 }
 
 // ActiveBangumiMirror returns the mirror selected in settings. The selected
@@ -500,10 +505,13 @@ func BangumiSearchMirrors() []string {
 	out := make([]string, 0, len(mirrors)+1)
 	seen := map[string]bool{}
 	for _, mirror := range append([]string{active}, mirrors...) {
-		if mirror != "" && !seen[mirror] {
-			seen[mirror] = true
-			out = append(out, mirror)
+		// next.bangumi.lat only exposes p1 endpoints; v0/legacy search
+		// requests would return its HTML frontend.
+		if mirror == "" || mirror == nextBangumiMirror || seen[mirror] {
+			continue
 		}
+		seen[mirror] = true
+		out = append(out, mirror)
 	}
 	if !seen[bangumiAuthMirrorDomain] {
 		out = append(out, bangumiAuthMirrorDomain)
@@ -515,20 +523,31 @@ func bangumiMirrorBase() string {
 	return ActiveBangumiMirror()
 }
 
+// bangumiMirrorSupportsPath reports whether a mirror can serve a path. The
+// next API mirror only implements p1 routes; the auth proxy avoids p1 and
+// Kazumi-specific routes.
+func bangumiMirrorSupportsPath(mirror, path string) bool {
+	switch mirror {
+	case nextBangumiMirror:
+		return strings.HasPrefix(path, "/p1/")
+	case bangumiAuthMirrorDomain:
+		return !strings.HasPrefix(path, "/p1/") && !strings.HasPrefix(path, "/kazumi/")
+	default:
+		return true
+	}
+}
+
 func bangumiMirrorBaseForPath(path string) string {
 	active := ActiveBangumiMirror()
-	if strings.HasPrefix(path, "/p1/") || strings.HasPrefix(path, "/kazumi/") {
-		if active != bangumiAuthMirrorDomain {
-			return active
-		}
-		for _, mirror := range BangumiMirrors() {
-			if mirror != bangumiAuthMirrorDomain {
-				return mirror
-			}
-		}
-		return bangumiMirrorDomain
+	if bangumiMirrorSupportsPath(active, path) {
+		return active
 	}
-	return active
+	for _, mirror := range BangumiMirrors() {
+		if bangumiMirrorSupportsPath(mirror, path) {
+			return mirror
+		}
+	}
+	return bangumiMirrorDomain
 }
 
 func isBangumiAPIHost(host string) bool {

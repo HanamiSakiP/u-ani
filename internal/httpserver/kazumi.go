@@ -49,6 +49,10 @@ func adminKazumiRouter(w http.ResponseWriter, r *http.Request, path string) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "已清除 Kazumi 时间表/推荐缓存"})
 	case r.Method == http.MethodPost && path == "search":
 		adminKazumiSearch(w, r)
+	case r.Method == http.MethodGet && path == "cache/export":
+		adminCacheExport(w, r)
+	case r.Method == http.MethodPost && path == "cache/import":
+		adminCacheImport(w, r)
 	case r.Method == http.MethodPost && path == "sources":
 		handleKazumiSources(w, r)
 	case r.Method == http.MethodPost && path == "test-mirror":
@@ -61,10 +65,18 @@ func adminKazumiRouter(w http.ResponseWriter, r *http.Request, path string) {
 		adminKazumiStartDownload(w, r)
 	case r.Method == http.MethodGet && path == "downloads":
 		adminKazumiDownloads(w, r)
+	case r.Method == http.MethodGet && path == "downloads/export":
+		adminDownloadExport(w, r)
+	case r.Method == http.MethodPost && path == "downloads/import":
+		adminDownloadImport(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(path, "downloads/") && strings.HasSuffix(path, "/retry"):
 		adminKazumiRetryDownload(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "downloads/"), "/retry"))
 	case r.Method == http.MethodDelete && strings.HasPrefix(path, "downloads/"):
 		adminKazumiDeleteDownload(w, r, strings.TrimPrefix(path, "downloads/"))
+	case r.Method == http.MethodGet && path == "browse/export":
+		adminBrowseCacheExport(w, r)
+	case r.Method == http.MethodPost && path == "browse/import":
+		adminBrowseCacheImport(w, r)
 	case r.Method == http.MethodGet && path == "files":
 		adminKazumiFiles(w, r)
 	case r.Method == http.MethodDelete && path == "files":

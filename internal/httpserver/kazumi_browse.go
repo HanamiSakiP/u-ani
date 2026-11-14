@@ -366,6 +366,18 @@ func handleKazumiRecommendCategories(w http.ResponseWriter, r *http.Request) {
 }
 
 func clearKazumiBrowseCache() {
+	resetKazumiBrowseCacheMemory()
+	_ = os.Remove(timelineCachePath())
+	matches, _ := filepath.Glob(filepath.Join(controllers.KazumiCacheDir(), "recommend_*.json"))
+	for _, match := range matches {
+		_ = os.Remove(match)
+	}
+}
+
+// resetKazumiBrowseCacheMemory drops the in-process timeline/recommend
+// caches. Disk caches are kept so they can be reloaded (for example after an
+// imported cache snapshot replaces the files).
+func resetKazumiBrowseCacheMemory() {
 	timelineMu.Lock()
 	timelineCache = nil
 	timelineAt = time.Time{}
@@ -373,11 +385,6 @@ func clearKazumiBrowseCache() {
 	recommendMu.Lock()
 	recommendCache = map[string]recommendEntry{}
 	recommendMu.Unlock()
-	_ = os.Remove(timelineCachePath())
-	matches, _ := filepath.Glob(filepath.Join(controllers.KazumiCacheDir(), "recommend_*.json"))
-	for _, match := range matches {
-		_ = os.Remove(match)
-	}
 }
 
 // refreshKazumiBrowseCache updates the timeline/recommend caches and stores
