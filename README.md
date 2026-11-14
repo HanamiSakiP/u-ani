@@ -57,6 +57,8 @@ uani upgrade --no-install # 跳过安装，只迁移数据库
 
 远程升级成功后会同步一份源码到 `${UANI_PATH}/source`（默认 `~/.uani/source`），后续可以用 `--local` 从这份源码离线构建。源码目录中会写入 `.uani-source-version` 记录版本。执行 `uani install` 时也会尝试同步源码，可用 `--no-source` 跳过。Web 升级时也可以选择「远程 go install」或「本地源码」。
 
+检查更新会优先读取 GitHub 仓库的最新 Release / Tag，因此新版本推送后会立即生效；GitHub 不可达时自动回退到 Go 模块代理。同步源码优先使用 Go 模块缓存，失败时直接下载 GitHub 对应版本的源码归档（tar.gz），不依赖模块代理是否已经收录该版本。GitHub API 触发限流时可设置 `UANI_GITHUB_TOKEN`（或 `GITHUB_TOKEN` / `GH_TOKEN`）提升额度。
+
 也可以在 Web UI 的「设置 → 运行信息与升级」中操作：检查更新、指定版本、选择「远程 go install」或「本地源码」、同步源码。升级使用：
 
 ```bash

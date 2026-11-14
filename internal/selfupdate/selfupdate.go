@@ -2,10 +2,13 @@
 package selfupdate
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -26,6 +29,10 @@ const (
 	CommandPath = ModulePath + "/cmd/uani"
 	// SourceVersionFile records the version of the local source copy.
 	SourceVersionFile = ".uani-source-version"
+	// repoAPIURL is the GitHub API endpoint of the uani repository.
+	repoAPIURL = "https://api.github.com/repos/HanamiSakiP/u-ani"
+	// repoArchiveURL points at the GitHub source archives of the repository.
+	repoArchiveURL = "https://codeload.github.com/HanamiSakiP/u-ani/tar.gz"
 )
 
 // Version is a parsed semantic version.
@@ -191,8 +198,15 @@ func Check(ctx context.Context) Status {
 	return status
 }
 
-// LatestVersion returns the newest published uani version.
+// LatestVersion returns the newest published uani version. The GitHub
+// repository is consulted first so that a freshly pushed tag or release is
+// picked up even before it reaches a Go module proxy. The Go module proxy is
+// kept as a fallback for networks where the GitHub API is unreachable.
 func LatestVersion(ctx context.Context) (string, error) {
+	githubVersion, githubErr := latestFromGitHub(ctx)
+	if githubErr == nil {
+		return githubVersion, nil
+	}
 	var goErr error
 	if _, err := exec.LookPath("go"); err == nil {
 		if version, err := goListLatest(ctx); err == nil {
@@ -206,9 +220,97 @@ func LatestVersion(ctx context.Context) (string, error) {
 		return version, nil
 	}
 	if goErr != nil {
-		return "", fmt.Errorf("go list failed: %v; proxy check failed: %v", goErr, err)
+		return "", fmt.Errorf("github check failed: %v; go list failed: %v; proxy check failed: %v", githubErr, goErr, err)
 	}
-	return "", err
+	return "", fmt.Errorf("github check failed: %v; proxy check failed: %v", githubErr, err)
+}
+
+// latestFromGitHub asks the GitHub API for the newest tag. It prefers the
+// latest published release and falls back to the tag list when the repository
+// has no release yet.
+func latestFromGitHub(ctx context.Context) (string, error) {
+	var release struct {
+		TagName    string `json:"tag_name"`
+		Draft      bool   `json:"draft"`
+		Prerelease bool   `json:"prerelease"`
+	}
+	releaseErr := githubGetJSON(ctx, repoAPIURL+"/releases/latest", &release)
+	if releaseErr == nil {
+		if version := strings.TrimSpace(release.TagName); version != "" && !release.Draft && !release.Prerelease {
+			return normalizeModuleVersion(version), nil
+		}
+	}
+	var tags []struct {
+		Name string `json:"name"`
+	}
+	tagsErr := githubGetJSON(ctx, repoAPIURL+"/tags?per_page=100", &tags)
+	if tagsErr != nil {
+		if releaseErr != nil {
+			return "", fmt.Errorf("releases: %v; tags: %v", releaseErr, tagsErr)
+		}
+		return "", tagsErr
+	}
+	names := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		names = append(names, tag.Name)
+	}
+	version := newestTag(names)
+	if version == "" {
+		if releaseErr != nil {
+			return "", fmt.Errorf("no version tag found (releases: %v)", releaseErr)
+		}
+		return "", fmt.Errorf("no version tag found")
+	}
+	return normalizeModuleVersion(version), nil
+}
+
+// newestTag returns the highest semantic version among names, ignoring tags
+// that do not look like a version.
+func newestTag(names []string) string {
+	best := ""
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if !versionTagPattern.MatchString(name) {
+			continue
+		}
+		if best == "" || Compare(name, best) > 0 {
+			best = name
+		}
+	}
+	return best
+}
+
+var versionTagPattern = regexp.MustCompile(`^v?\d+\.\d+\.\d+`)
+
+func githubGetJSON(ctx context.Context, url string, target any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "uani/"+config.Version)
+	if token := githubToken(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := httpx.Client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return fmt.Errorf("%s: HTTP %d", url, resp.StatusCode)
+	}
+	return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(target)
+}
+
+func githubToken() string {
+	for _, key := range []string{"UANI_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func goListLatest(ctx context.Context) (string, error) {
@@ -455,10 +557,11 @@ func SyncSource(ctx context.Context, version, dir string) (SourceResult, error) 
 	if dir == "" {
 		dir = SourceDir()
 	}
-	moduleDir, err := moduleSourceDir(ctx, version)
+	moduleDir, cleanup, err := sourceTree(ctx, version)
 	if err != nil {
 		return result, err
 	}
+	defer cleanup()
 	parent := filepath.Dir(dir)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return result, err
@@ -486,6 +589,22 @@ func SyncSource(ctx context.Context, version, dir string) (SourceResult, error) 
 	return result, nil
 }
 
+// sourceTree returns a directory containing the source code of version. The Go
+// module cache is used when possible; otherwise the tagged archive is fetched
+// directly from GitHub so that source synchronization does not lag behind the
+// repository (or require Go to resolve the module).
+func sourceTree(ctx context.Context, version string) (string, func(), error) {
+	moduleDir, moduleErr := moduleSourceDir(ctx, version)
+	if moduleErr == nil {
+		return moduleDir, func() {}, nil
+	}
+	archiveDir, cleanup, archiveErr := downloadGitHubSource(ctx, version)
+	if archiveErr == nil {
+		return archiveDir, cleanup, nil
+	}
+	return "", func() {}, fmt.Errorf("go mod download failed: %v; GitHub archive failed: %v", moduleErr, archiveErr)
+}
+
 func moduleSourceDir(ctx context.Context, version string) (string, error) {
 	goBin, err := exec.LookPath("go")
 	if err != nil {
@@ -510,6 +629,112 @@ func moduleSourceDir(ctx context.Context, version string) (string, error) {
 		return "", fmt.Errorf("go mod download returned no source directory")
 	}
 	return info.Dir, nil
+}
+
+// downloadGitHubSource downloads and extracts the GitHub archive of version.
+// The returned cleanup function removes the temporary directory.
+func downloadGitHubSource(ctx context.Context, version string) (string, func(), error) {
+	url := repoArchiveURL + "/" + githubRef(version)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", func() {}, err
+	}
+	req.Header.Set("User-Agent", "uani/"+config.Version)
+	resp, err := httpx.Client().Do(req)
+	if err != nil {
+		return "", func() {}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", func() {}, fmt.Errorf("%s: HTTP %d", url, resp.StatusCode)
+	}
+	dir, err := os.MkdirTemp("", "uani-github-*")
+	if err != nil {
+		return "", func() {}, err
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	gz, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	defer gz.Close()
+	if err := extractTar(gz, dir); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	// GitHub archives wrap everything in a single <owner>-<repo>-<ref>/ folder.
+	if len(entries) == 1 && entries[0].IsDir() {
+		return filepath.Join(dir, entries[0].Name()), cleanup, nil
+	}
+	return dir, cleanup, nil
+}
+
+func extractTar(r io.Reader, dst string) error {
+	tr := tar.NewReader(r)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		// Strip the archive's top-level directory.
+		name := strings.TrimPrefix(filepath.ToSlash(header.Name), "./")
+		if i := strings.IndexByte(name, '/'); i >= 0 {
+			name = name[i+1:]
+		} else {
+			continue
+		}
+		if name == "" {
+			continue
+		}
+		target := filepath.Join(dst, filepath.FromSlash(name))
+		if !pathWithin(dst, target) {
+			return fmt.Errorf("refusing to extract unsafe path %q", header.Name)
+		}
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(target, data, header.FileInfo().Mode().Perm()); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func pathWithin(root, target string) bool {
+	root, target = filepath.Clean(root), filepath.Clean(target)
+	if root == target {
+		return true
+	}
+	return strings.HasPrefix(target, root+string(os.PathSeparator))
+}
+
+// githubRef converts a version into the reference used by GitHub archives.
+// Version tags are addressed explicitly; anything else is treated as a branch
+// or commit reference.
+func githubRef(version string) string {
+	if versionTagPattern.MatchString(version) {
+		return "refs/tags/" + version
+	}
+	return version
 }
 
 func copyTree(src, dst string) error {
