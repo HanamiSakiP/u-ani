@@ -1,8 +1,10 @@
 package uani
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
 	"sort"
 	"strings"
@@ -22,6 +24,7 @@ import (
 	"github.com/HanamiSakiP/u-ani/internal/model"
 	"github.com/HanamiSakiP/u-ani/internal/postprocessor"
 	"github.com/HanamiSakiP/u-ani/internal/script"
+	"github.com/HanamiSakiP/u-ani/internal/selfupdate"
 	"github.com/HanamiSakiP/u-ani/internal/source"
 	"github.com/HanamiSakiP/u-ani/internal/update"
 	"github.com/HanamiSakiP/u-ani/internal/updatecheck"
@@ -129,21 +132,174 @@ var installCmd = &cobra.Command{
 		if !noWeb {
 			logger.Info("built-in web UI is bundled; no external frontend download is needed")
 		}
+		noSource, _ := cmd.Flags().GetBool("no-source")
+		if !noSource {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			if synced, err := selfupdate.SyncSource(ctx, config.Version, selfupdate.SourceDir()); err != nil {
+				logger.Warning("Could not synchronize the local source copy: %v", err)
+			} else {
+				logger.Success("uani source %s synchronized to %s", synced.Version, synced.Path)
+			}
+		}
 		return nil
 	},
 }
 
 var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
-	Short: "Upgrade from previous version.",
+	Short: "Upgrade uani with go install and migrate the database.",
+	Long: `Upgrade uani itself with go install:
+
+  go install github.com/HanamiSakiP/u-ani/cmd/uani@latest
+
+A copy of the source tree is kept in <UANI_PATH>/source and synchronized after
+each upgrade. Use --local to build and install from that local copy instead:
+
+  uani upgrade --local
+
+The local database is migrated afterwards. Use --check to only check the
+latest version without installing anything.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		checkOnly, _ := cmd.Flags().GetBool("check")
+		force, _ := cmd.Flags().GetBool("force")
+		noInstall, _ := cmd.Flags().GetBool("no-install")
+		localMode, _ := cmd.Flags().GetBool("local")
+		sourceDir, _ := cmd.Flags().GetString("source-dir")
+		noSync, _ := cmd.Flags().GetBool("no-sync")
+		dbOnly, _ := cmd.Flags().GetBool("db-only")
+		dbOnly = dbOnly || os.Getenv("UANI_UPGRADE_DB_ONLY") == "1"
+		target, _ := cmd.Flags().GetString("version")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+
+		if checkOnly {
+			status := selfupdate.Check(ctx)
+			if status.Error != "" {
+				return fmt.Errorf("failed to check the latest version: %s", status.Error)
+			}
+			sourceVersion := status.SourceVersion
+			if !status.SourceReady {
+				sourceVersion = "not synchronized"
+			}
+			fmt.Printf("current: %s\nlatest:  %s\nsource:  %s (%s)\n", status.Current, status.Latest, status.SourcePath, sourceVersion)
+			if status.Updatable {
+				fmt.Println("Run `uani upgrade` to install the latest version.")
+			} else {
+				fmt.Println("uani is up to date.")
+			}
+			return nil
+		}
+
 		if err := update.CreateDir(); err != nil {
 			return err
 		}
+		if dbOnly {
+			update.UpdateDatabase()
+			return nil
+		}
+
+		installed := false
+		var result selfupdate.Result
+		if !noInstall {
+			switch {
+			case localMode:
+				dir := sourceDir
+				if dir == "" {
+					dir = selfupdate.SourceDir()
+					if !noSync {
+						syncVersion := target
+						if syncVersion == "" {
+							syncVersion = "latest"
+						}
+						if synced, err := selfupdate.SyncSource(ctx, syncVersion, dir); err != nil {
+							if !selfupdate.SourceReady(dir) {
+								return fmt.Errorf("could not synchronize local source: %w", err)
+							}
+							logger.Warning("Could not update local source %s, using the existing copy: %v", dir, err)
+						} else {
+							logger.Success("uani source %s synchronized to %s", synced.Version, synced.Path)
+						}
+					}
+				}
+				if !selfupdate.SourceReady(dir) {
+					return fmt.Errorf("%s is not a uani source directory", dir)
+				}
+				var err error
+				result, err = selfupdate.InstallLocal(ctx, dir)
+				if err != nil {
+					return err
+				}
+				installed = true
+				logger.Success("uani %s installed from %s to %s", result.Version, dir, result.Path)
+				if !result.Replaced {
+					executable, _ := os.Executable()
+					logger.Warning("Current binary %s was not replaced. Restart with %s to use the new version.", executable, result.Path)
+				}
+			default:
+				explicitTarget := strings.TrimSpace(target) != ""
+				status := selfupdate.Check(ctx)
+				if target == "" {
+					target = "latest"
+					if status.Error != "" {
+						logger.Warning("Could not check the latest version: %s", status.Error)
+					} else if status.Latest != "" {
+						target = status.Latest
+					}
+				}
+				if !force && !explicitTarget && status.Latest != "" && !status.Updatable {
+					logger.Success("uani %s is already the latest version.", config.Version)
+					syncSourceIfNeeded(ctx, status.Latest, status.SourceVersion)
+				} else {
+					var err error
+					result, err = selfupdate.Install(ctx, target)
+					if err != nil {
+						return err
+					}
+					installed = true
+					logger.Success("uani %s installed to %s", result.Version, result.Path)
+					if !result.Replaced {
+						executable, _ := os.Executable()
+						logger.Warning("Current binary %s was not replaced. Restart with %s to use the new version.", executable, result.Path)
+					}
+					syncSourceBestEffort(ctx, result.Version)
+				}
+			}
+		}
+
+		// Let the newly installed binary apply migrations it may know about.
+		if installed && result.Path != "" {
+			upgrade := exec.CommandContext(ctx, result.Path, "upgrade")
+			upgrade.Env = append(os.Environ(), "UANI_UPGRADE_DB_ONLY=1")
+			upgrade.Stdout = os.Stdout
+			upgrade.Stderr = os.Stderr
+			if err := upgrade.Run(); err != nil {
+				logger.Warning("The new binary could not migrate the database: %v", err)
+				update.UpdateDatabase()
+			}
+			return nil
+		}
+
 		update.UpdateDatabase()
-		updatecheck.CheckUpdate()
 		return nil
 	},
+}
+
+func syncSourceIfNeeded(ctx context.Context, version, current string) {
+	if current != "" && strings.TrimPrefix(current, "v") == strings.TrimPrefix(version, "v") {
+		return
+	}
+	syncSourceBestEffort(ctx, version)
+}
+
+func syncSourceBestEffort(ctx context.Context, version string) {
+	synced, err := selfupdate.SyncSource(ctx, version, selfupdate.SourceDir())
+	if err != nil {
+		logger.Warning("Could not synchronize the local source copy: %v", err)
+		return
+	}
+	logger.Success("uani source %s synchronized to %s", synced.Version, synced.Path)
 }
 
 var sourceCmd = &cobra.Command{
@@ -820,8 +976,9 @@ var httpCmd = &cobra.Command{
 		noMCP, _ := cmd.Flags().GetBool("no-mcp")
 		apiOnly, _ := cmd.Flags().GetBool("api-only")
 		options := httpserver.Options{
-			Web: !config.Cfg.HTTP.DisableWeb && !noWeb && !apiOnly,
-			MCP: !config.Cfg.HTTP.DisableMCP && !noMCP && !apiOnly,
+			Web:       !config.Cfg.HTTP.DisableWeb && !noWeb && !apiOnly,
+			MCP:       !config.Cfg.HTTP.DisableMCP && !noMCP && !apiOnly,
+			MCPToggle: !apiOnly,
 		}
 		return httpserver.Run(address, port, options)
 	},
@@ -1606,6 +1763,16 @@ func init() {
 	rootCmd.SetVersionTemplate(fmt.Sprintf("uani %sver. {{.Version}}%s\n\nCompatible with BGmi by RicterZ\nGithub: https://github.com/HanamiSakiP/u-ani\n", logger.AnsiYellow, logger.AnsiEnd))
 
 	installCmd.Flags().Bool("no-web", false, "Do not download web static files.")
+	installCmd.Flags().Bool("no-source", false, "Do not synchronize the local source copy.")
+	upgradeCmd.Flags().Bool("check", false, "Only check the latest version without installing.")
+	upgradeCmd.Flags().Bool("force", false, "Reinstall even when uani is already up to date.")
+	upgradeCmd.Flags().Bool("no-install", false, "Skip go install and only run database migrations.")
+	upgradeCmd.Flags().Bool("local", false, "Build and install from the local source copy instead of the Go module proxy.")
+	upgradeCmd.Flags().String("source-dir", "", "Source directory used by --local (default: <UANI_PATH>/source).")
+	upgradeCmd.Flags().Bool("no-sync", false, "Do not synchronize the source copy before a --local build.")
+	upgradeCmd.Flags().Bool("db-only", false, "Only run database migrations.")
+	upgradeCmd.Flags().String("version", "", "Install a specific version, e.g. v1.2.3 (default: latest).")
+	_ = upgradeCmd.Flags().MarkHidden("db-only")
 	rootCmd.AddCommand(installCmd)
 	rootCmd.AddCommand(upgradeCmd)
 	rootCmd.AddCommand(sourceCmd)

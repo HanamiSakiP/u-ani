@@ -1346,6 +1346,26 @@ func (d *DB) SaveBangumiCollection(subjectID, collectionType int) error {
 	return err
 }
 
+// DeleteBangumiCollection clears the cached Bangumi collection type.
+func (d *DB) DeleteBangumiCollection(subjectID int) error {
+	_, err := d.Exec(`DELETE FROM bangumi_collection WHERE subject_id = ?`, subjectID)
+	return err
+}
+
+// HasDeletedFollowedBySubjectID reports whether subjectID is linked to a
+// subscription that has already been unsubscribed.
+func (d *DB) HasDeletedFollowedBySubjectID(subjectID int) bool {
+	if subjectID <= 0 {
+		return false
+	}
+	var exists int
+	err := d.QueryRow(`SELECT 1 FROM followed f WHERE f.status = ? AND (
+		EXISTS (SELECT 1 FROM bangumi_link l WHERE l.bangumi_name = f.bangumi_name AND l.subject_id = ?)
+		OR EXISTS (SELECT 1 FROM manual_bangumi m WHERE m.bangumi_name = f.bangumi_name AND m.provider = 'bgmtv' AND CAST(m.provider_id AS INTEGER) = ?)
+	) LIMIT 1`, FollowedStatusDeleted, subjectID, subjectID).Scan(&exists)
+	return err == nil && exists == 1
+}
+
 // FindFollowedBySubjectID locates a subscription linked to a bgm.tv subject.
 func (d *DB) FindFollowedBySubjectID(subjectID int) (*FollowedBangumi, error) {
 	if subjectID <= 0 {

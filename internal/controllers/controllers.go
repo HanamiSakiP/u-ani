@@ -571,11 +571,39 @@ func Delete(name string, clearAll bool, batch bool) Result {
 				return Result{Status: "error", Message: "user canceled"}
 			}
 		}
+		all, err := db.Conn.AllFollowed()
+		if err != nil {
+			return Result{Status: "error", Message: err.Error()}
+		}
+		names := make([]string, 0, len(all))
+		for _, item := range all {
+			if item.Status != db.FollowedStatusDeleted {
+				names = append(names, item.BangumiName)
+			}
+		}
 		if err := db.Conn.DeleteAllFollowed(); err != nil {
 			return Result{Status: "error", Message: err.Error()}
 		}
+		cleared, failed := 0, 0
+		for _, item := range names {
+			subjectID, clearErr := ClearSubscriptionCollection(item)
+			if subjectID > 0 {
+				if clearErr != nil {
+					failed++
+				} else {
+					cleared++
+				}
+			}
+		}
 		_ = db.Conn.DeleteAllManualBangumi()
-		return Result{Status: "warning", Message: "all subscriptions have been deleted"}
+		message := "all subscriptions have been deleted"
+		if cleared > 0 {
+			message += fmt.Sprintf("; cleared Bangumi collection status for %d item(s)", cleared)
+		}
+		if failed > 0 {
+			message += fmt.Sprintf("; failed to clear %d item(s)", failed)
+		}
+		return Result{Status: "warning", Message: message}
 	}
 	if name != "" {
 		followed, err := db.Conn.GetFollowed(name)
@@ -586,7 +614,15 @@ func Delete(name string, clearAll bool, batch bool) Result {
 		if err := db.Conn.SaveFollowed(followed); err != nil {
 			return Result{Status: "error", Message: err.Error()}
 		}
-		return Result{Status: "warning", Message: fmt.Sprintf("Bangumi %s has been deleted", name)}
+		message := fmt.Sprintf("Bangumi %s has been deleted", name)
+		subjectID, clearErr := ClearSubscriptionCollection(name)
+		switch {
+		case clearErr != nil:
+			message += fmt.Sprintf("; failed to clear Bangumi collection: %v", clearErr)
+		case subjectID > 0:
+			message += " and its Bangumi collection status was cleared"
+		}
+		return Result{Status: "warning", Message: message}
 	}
 	return Result{Status: "warning", Message: "Nothing has been done."}
 }

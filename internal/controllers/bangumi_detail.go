@@ -57,6 +57,48 @@ func GetBangumiCollection(subjectID int) (int, bool, error) {
 	return value, true, nil
 }
 
+// ClearBangumiCollection removes a subject from the user's Bangumi collection
+// and clears the local cache. Missing tokens or unlinked subscriptions are
+// treated as success because there is no remote state to change.
+func ClearBangumiCollection(subjectID int) error {
+	if subjectID <= 0 {
+		return nil
+	}
+	if err := ensureDB(); err != nil {
+		return err
+	}
+	value, cacheErr := db.Conn.GetBangumiCollection(subjectID)
+	hadStatus := cacheErr == nil && value > 0
+	// Keep a zero-value tombstone so a failed remote delete cannot resurrect
+	// the cached status through the Bangumi API fallback.
+	_ = db.Conn.SaveBangumiCollection(subjectID, 0)
+	token := strings.TrimSpace(config.Cfg.Bangumi.AccessToken)
+	if token == "" {
+		if hadStatus {
+			return fmt.Errorf("Bangumi Access Token is not configured; local collection cache was cleared")
+		}
+		return nil
+	}
+	return bgmtv.DeleteCollection(subjectID, token)
+}
+
+// ClearSubscriptionCollection finds the bgm.tv subject linked to a local
+// subscription and clears its collection status. It returns the subject id so
+// callers can report what happened.
+func ClearSubscriptionCollection(name string) (int, error) {
+	if err := ensureDB(); err != nil {
+		return 0, err
+	}
+	subjectID, err := db.Conn.GetSubjectIDByBangumiName(name)
+	if err != nil || subjectID <= 0 {
+		return 0, nil
+	}
+	if err := ClearBangumiCollection(subjectID); err != nil {
+		return subjectID, err
+	}
+	return subjectID, nil
+}
+
 // LinkBangumiSubject stores a manual subscription -> bgm.tv subject mapping.
 func LinkBangumiSubject(name, value string) (int, error) {
 	name = strings.TrimSpace(name)

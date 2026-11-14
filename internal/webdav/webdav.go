@@ -44,7 +44,7 @@ func (c *Client) request(ctx context.Context, method, path string, body []byte) 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	}
-	req.Header.Set("User-Agent", "uani/1.0.0 (webdav sync)")
+	req.Header.Set("User-Agent", "uani/1.0.1 (webdav sync)")
 	return httpx.Client().Do(req)
 }
 

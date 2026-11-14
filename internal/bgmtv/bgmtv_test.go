@@ -204,6 +204,7 @@ func TestParseCollectionTypes(t *testing.T) {
 func TestBangumiAccountAndCollections(t *testing.T) {
 	var sawAuth string
 	var postedType float64
+	var deleted bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawAuth = r.Header.Get("Authorization")
 		switch {
@@ -262,6 +263,9 @@ func TestBangumiAccountAndCollections(t *testing.T) {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			postedType, _ = body["type"].(float64)
 			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/v0/users/-/collections/101" && r.Method == http.MethodDelete:
+			deleted = true
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
 		}
@@ -308,6 +312,12 @@ func TestBangumiAccountAndCollections(t *testing.T) {
 	}
 	if postedType != 3 {
 		t.Fatalf("posted collection type = %v, want 3", postedType)
+	}
+	if err := DeleteCollection(101, "secret-token"); err != nil {
+		t.Fatal(err)
+	}
+	if !deleted {
+		t.Fatal("DELETE collection request was not sent")
 	}
 }
 

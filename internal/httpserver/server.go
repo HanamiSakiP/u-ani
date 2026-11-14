@@ -3,6 +3,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/HanamiSakiP/u-ani/internal/config"
@@ -22,13 +24,36 @@ import (
 
 // Options controls which optional HTTP services are exposed.
 type Options struct {
-	Web bool
-	MCP bool
+	Web       bool
+	MCP       bool
+	MCPToggle bool
 }
 
 // DefaultOptions enables the embedded Web UI and MCP endpoints.
 func DefaultOptions() Options {
-	return Options{Web: true, MCP: true}
+	return Options{Web: true, MCP: true, MCPToggle: true}
+}
+
+// serverState holds per-handler runtime switches. Keeping it out of the
+// global config avoids races between concurrent handler trees (for example in
+// tests) while still allowing the Web UI to toggle MCP at runtime.
+type serverState struct {
+	mcpEnabled atomic.Bool
+	mcpToggle  bool
+}
+
+type serverStateKey struct{}
+
+func withServerState(next http.Handler, state *serverState) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), serverStateKey{}, state)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func serverStateFrom(r *http.Request) *serverState {
+	state, _ := r.Context().Value(serverStateKey{}).(*serverState)
+	return state
 }
 
 // Handler builds the default HTTP handler tree (Web UI and MCP enabled).
@@ -40,10 +65,19 @@ func Handler() http.Handler {
 // services. The JSON API, media files and calendar feed are always available.
 func HandlerWithOptions(options Options) http.Handler {
 	mux := http.NewServeMux()
+	state := &serverState{mcpToggle: options.MCPToggle}
+	state.mcpEnabled.Store(options.MCP)
 	mux.HandleFunc("/api/", apiRouter)
-	if options.MCP {
-		mux.HandleFunc("/mcp", mcpRouter)
-		mux.HandleFunc("/mcp/", mcpRouter)
+	if options.MCP || options.MCPToggle {
+		mcpHandler := func(w http.ResponseWriter, r *http.Request) {
+			if !state.mcpEnabled.Load() {
+				http.NotFound(w, r)
+				return
+			}
+			mcpRouter(w, r)
+		}
+		mux.HandleFunc("/mcp", mcpHandler)
+		mux.HandleFunc("/mcp/", mcpHandler)
 	} else {
 		mux.HandleFunc("/mcp", http.NotFound)
 		mux.HandleFunc("/mcp/", http.NotFound)
@@ -58,19 +92,19 @@ func HandlerWithOptions(options Options) http.Handler {
 
 	if !options.Web {
 		mux.HandleFunc("/", http.NotFound)
-		return WithMiddleware(mux)
-	}
-
-	// An installed legacy frontend wins when explicitly enabled. Otherwise the
-	// bundled web UI is always available, so `uani http` works out of the box.
-	if config.Cfg.HTTP.ServeStaticFiles {
+	} else if config.Cfg.HTTP.ServeStaticFiles {
+		// An installed legacy frontend wins when explicitly enabled. Otherwise
+		// the bundled web UI is always available, so `uani http` works out of
+		// the box.
 		if _, err := os.Stat(filepath.Join(config.Cfg.FrontStaticPath, "index.html")); err == nil {
 			mux.Handle("/", spaHandler(config.Cfg.FrontStaticPath))
-			return WithMiddleware(mux)
+		} else {
+			mux.Handle("/", webui.Handler())
 		}
+	} else {
+		mux.Handle("/", webui.Handler())
 	}
-	mux.Handle("/", webui.Handler())
-	return WithMiddleware(mux)
+	return WithMiddleware(withServerState(mux, state))
 }
 
 // Run starts the HTTP server and blocks until it exits.

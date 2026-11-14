@@ -3,7 +3,7 @@
 `uani` 是 Go CLI 
 
 - 仓库：https://github.com/HanamiSakiP/u-ani
-- 当前版本：`1.0.0`
+- 当前版本：`1.0.1`
 
 ## 构建
 
@@ -39,6 +39,31 @@ export PATH="$HOME/go/bin:$PATH"
 ```
 
 > 首次安装需要 Go 1.26+。使用 `@latest` 前请确认仓库已经推送了带 `go.mod` 的版本标签或分支。
+
+### 自升级
+
+`uani upgrade` 会通过 Go 工具链安装最新版本并迁移本地数据库：
+
+```bash
+uani upgrade              # 检查最新版本，执行 go install ...@latest，再迁移数据库
+uani upgrade --check      # 只检查最新版本，不安装
+uani upgrade --force      # 已是最新版本时也重新安装
+uani upgrade --version v1.2.3   # 安装指定版本
+uani upgrade --local      # 使用本地源码构建并安装
+uani upgrade --local --no-sync   # 不联网同步源码，直接使用现有 ${UANI_PATH}/source
+uani upgrade --local --source-dir ./   # 使用指定源码目录（例如当前源码仓库）
+uani upgrade --no-install # 跳过安装，只迁移数据库
+```
+
+远程升级成功后会同步一份源码到 `${UANI_PATH}/source`（默认 `~/.uani/source`），后续可以用 `--local` 从这份源码离线构建。源码目录中会写入 `.uani-source-version` 记录版本。执行 `uani install` 时也会尝试同步源码，可用 `--no-source` 跳过。Web 升级时也可以选择「远程 go install」或「本地源码」。
+
+也可以在 Web UI 的「设置 → 运行信息与升级」中操作：检查更新、指定版本、选择「远程 go install」或「本地源码」、同步源码。升级使用：
+
+```bash
+go install github.com/HanamiSakiP/u-ani/cmd/uani@latest
+```
+
+因此需要本机安装 Go，且 `GOBIN`（默认 `$GOPATH/bin`）中的 `uani` 是当前运行的二进制。升级完成后需要重启 `uani http` 才会加载新版本。
 
 可选依赖：使用「用 Kazumi 下载番剧」功能时建议安装 `yt-dlp`（推荐）或 `ffmpeg`，程序会自动检测。Python 不是运行依赖，仅在需要兼容旧版 BGmi Python 脚本时才会使用。
 
@@ -94,7 +119,7 @@ UANI_PATH=/path/to/uani ./uani install --no-web
 
 ```text
 uani install                 初始化目录、数据库、crontab 和配置
-uani upgrade                 升级数据库并检查新版本
+uani upgrade                 通过 go install 升级 uani 并迁移数据库
 uani source <source>         切换数据源
 uani config print            输出配置文件
 uani config get <keys...>    读取配置项
@@ -119,7 +144,7 @@ uani sync login <token>      验证并保存 Bangumi Access Token
 uani sync logout             清除已保存的 Bangumi 账号
 uani sync status             查看追番同步状态
 uani sync types [types...]   查看/设置要同步的收藏分类
-uani delete <names...>       取消订阅
+uani delete <names...>       取消订阅（同时清除 Bangumi 收藏状态）
 uani list                    查看订阅列表
 uani filter <name>           设置字幕组 / 包含 / 排除 / 正则过滤
 uani cal                     查看每周番剧日历
@@ -289,7 +314,7 @@ uani kazumi download --rule AGE --name "葬送的芙莉莲" -e 1 --source "https
 - **Kazumi 时间表**：Bangumi 当季番剧放送时间表，可按星期切换，点击卡片查看详情；切换星期直接使用本地缓存；支持时间表 / 推荐缓存的单独 **导出 / 导入**（ZIP 压缩包，含已缓存封面和番剧文字信息）；
 - **Kazumi 推荐**：与原版一致的「热门番组 + 日常 / 原创 / 校园 / 搞笑 / 奇幻 / 百合 / 恋爱 / 悬疑 / 热血 / 后宫 / 机战 / 轻改 / 偶像 / 治愈 / 异世界」分类；搜索会查询 Bangumi 全站，返回后立即预加载结果封面，在线搜索不可用时回退本地时间表匹配并提示；**更新缓存**会同时预取所有分类，进入推荐页也会后台预热其余分类，之后切换分类无需等待网络；封面统一走图片代理并自动在加速模式与镜像之间快速切换；
 - **Kazumi Files**：下载任务按番剧合并显示，带封面、进度状态汇总和可折叠的剧集列表；媒体文件按同名番剧合并，点击展开选集后播放 / 打开 / 删除；另含已安装规则、规则仓库、网络设置、规则文件查看 / 编辑；
-- **设置**：管理令牌、运行信息，以及合并为单一面板的「同步与镜像源」；面板内通过按钮切换 **Bangumi 同步 / WebDAV 同步 / 镜像源**，镜像可添加、删除、测试并切换当前使用。
+- **设置**：管理令牌、运行信息与升级，以及合并为单一面板的「同步与镜像源」；面板内通过按钮切换 **Bangumi 同步 / WebDAV 同步 / 镜像源**，镜像可添加、删除、测试并切换当前使用；MCP 服务可以在运行信息中直接启用/关闭，立即生效并写回 `config.toml`。
 
 详情弹窗和图片预览都会限制在视口内，图片使用自适应缩放，不需要左右滚动条。图片预览支持「上一张 / 下一张」按钮，也可以使用键盘左右方向键切换。详情页支持通过按钮切换：
 
@@ -299,9 +324,18 @@ uani kazumi download --rule AGE --name "葬送的芙莉莲" -e 1 --source "https
 - **关联**：关联条目，可继续点开查看；
 - **制作人员**：导演、脚本、原作等制作信息。
 
-「追番」和「放送日历」的卡片可以直接点开同一个详情弹窗；弹窗顶部提供「上一部 / 下一部」按钮，可在当前追番筛选结果或当前日历日内连续切换。时间表 / 推荐详情会自动预取相邻条目，更新缓存后上一部 / 下一部无需等待网络。本地视频播放器会显示「已缓存 N 集」，并列出可点击的本地剧集，点击即可切换播放。封面会下载到本地 `.cover`，详情数据首次读取后缓存到数据库，之后可离线预览。未自动匹配到 Bangumi 条目时，可在弹窗中手动输入 bgm.tv 条目 ID 或链接进行关联。已经订阅的番剧会在时间表 / 推荐 / 日历详情中自动识别，显示「订阅中」和「取消订阅」，不会再出现「添加订阅」。
+「追番」和「放送日历」的卡片可以直接点开同一个详情弹窗；弹窗顶部提供「上一部 / 下一部」按钮，可在当前追番筛选结果或当前日历日内连续切换。时间表 / 推荐详情会自动预取相邻条目，更新缓存后上一部 / 下一部无需等待网络。本地视频播放器会显示「已缓存 N 集」，并列出可点击的本地剧集，点击即可切换播放。封面会下载到本地 `.cover`，详情数据首次读取后缓存到数据库，之后可离线预览。未自动匹配到 Bangumi 条目时，可在弹窗中手动输入 bgm.tv 条目 ID 或链接进行关联。已经订阅的番剧会在时间表 / 推荐 / 日历详情中自动识别，显示「订阅中」和「取消订阅」，不会再出现「添加订阅」。取消订阅时会同时清除该条目在 Bangumi 的收藏状态（想看 / 看过 / 在看 / 搁置 / 抛弃）；如果未配置 Access Token，则至少清除本地缓存并提示远程状态未清理。
 
-详情弹窗中的 Bangumi 收藏按钮支持切换 **想看 / 看过 / 在看 / 搁置 / 抛弃**，与 Bangumi 官方收藏状态一致；需要先在设置中连接 Bangumi Access Token。
+**本地播放器**：播放本地剧集时，播放器顶部会出现 **本地播放器** 按钮，点击后由 `uani http` 所在机器启动外部播放器（例如 mpv / VLC / PotPlayer / IINA）。默认会自动探测常见播放器；也可以显式配置：
+
+```toml
+[player]
+command = "mpv --fullscreen {path}"   # {path} 会替换为本地视频路径；留空则自动探测
+```
+
+Web 页面只把 `save_path` 或 Kazumi Files 目录内的媒体文件交给播放器，并会拒绝目录穿越和 HTTP 链接。打开本地播放器或「新窗口打开」时会自动暂停当前正在播放的视频。加载弹窗提供 **取消** 按钮，可中止正在进行的请求和等待。
+
+详情弹窗中的 Bangumi 收藏按钮支持切换 **想看 / 看过 / 在看 / 搁置 / 抛弃**，与 Bangumi 官方收藏状态一致；需要先在设置中连接 Bangumi Access Token。在「追番」页面以外（放送日历、Kazumi 时间表、推荐、关联条目等）切换收藏状态时，会自动把该条目添加到 uani 订阅；在「追番」页面内只同步收藏状态。
 
 管理操作需要输入 `[http] admin_token`，令牌仅保存在浏览器 localStorage。旧的外部前端仍可通过 `http.serve_static_files = true` 且 `front_static_path/index.html` 存在时覆盖内置页面。
 
@@ -428,6 +462,9 @@ uani cover
 - 追番备份 API：`GET /api/admin/bangumi/export/bundle`、`POST /api/admin/bangumi/import/bundle`（ZIP：追番列表 + 已缓存封面 + 番剧文字信息）
 - Kazumi 浏览缓存 API：`GET /api/admin/kazumi/browse/export`、`POST /api/admin/kazumi/browse/import`（ZIP：时间表 / 推荐缓存 + 已缓存封面 + 番剧文字信息）
 - 管理 API：`/api/admin/*`，需要 `Authorization: Bearer <admin_token>`
+- 自升级 API：`GET /api/admin/upgrade`（检查版本、源码目录）、`POST /api/admin/upgrade`（`go install`，body 可选 `{"mode":"remote|local","version":"v1.2.3"}`）、`POST /api/admin/upgrade/source`（同步源码，body 可选 `{"version":"v1.2.3"}`）
+- 本地播放器 API：`POST /api/admin/play-local`（body `{"path":"/bangumi/..."}` 或 `{"path":"/kazumi-files/..."}`）
+- 服务开关 API：`GET/PATCH /api/admin/http/settings`（`mcp_enabled`，修改后立即生效并写入配置）
 - 日历订阅：`/resource/calendar.ics`
 - MCP：`POST /mcp`（Streamable HTTP）、`GET /mcp/sse`、`POST /mcp/messages`
 - 内置 Web UI：`/`（随二进制发布，无需安装）
@@ -473,6 +510,9 @@ serve_static_files = false
 disable_web = false
 disable_mcp = false
 danmaku_api_url = ""
+
+[player]
+command = ""                         # 例如 "mpv --fullscreen {path}"；留空自动探测
 
 [kazumi]
 rule_repository = ""                 # 空值表示官方 KazumiRules 仓库

@@ -350,10 +350,19 @@ func TestSeenBatchRejectsInvalidEpisodes(t *testing.T) {
 
 func TestDelete(t *testing.T) {
 	setupControllersDB(t)
+	oldToken := config.Cfg.Bangumi.AccessToken
+	config.Cfg.Bangumi.AccessToken = ""
+	t.Cleanup(func() { config.Cfg.Bangumi.AccessToken = oldToken })
 	name := "海贼王"
 	addBangumi(t, model.WebsiteBangumi{ID: "one-piece", Name: name, UpdateDay: "Mon"})
 	if result := Add(name, intPtr(0), nil, nil, nil); result.Status != "success" {
 		t.Fatalf("Add status = %q (%s)", result.Status, result.Message)
+	}
+	if err := db.Conn.SaveBangumiLink(name, 101); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Conn.SaveBangumiCollection(101, 3); err != nil {
+		t.Fatal(err)
 	}
 
 	if result := Delete(name, false, false); result.Status != "warning" {
@@ -365,6 +374,51 @@ func TestDelete(t *testing.T) {
 	}
 	if followed.Status != db.FollowedStatusDeleted {
 		t.Errorf("followed status = %d, want deleted", followed.Status)
+	}
+	if value, err := db.Conn.GetBangumiCollection(101); err != nil || value != 0 {
+		t.Errorf("cached Bangumi collection status = %d, %v; want tombstone 0", value, err)
+	}
+}
+
+func TestDeleteClearsRemoteCollection(t *testing.T) {
+	setupControllersDB(t)
+	oldToken, oldBase := config.Cfg.Bangumi.AccessToken, bgmtv.APIBase
+	config.Cfg.Bangumi.AccessToken = "secret-token"
+	deleted := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && r.URL.Path == "/v0/users/-/collections/101" {
+			deleted = true
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	bgmtv.APIBase = server.URL
+	t.Cleanup(func() {
+		config.Cfg.Bangumi.AccessToken = oldToken
+		bgmtv.APIBase = oldBase
+	})
+
+	name := "海贼王"
+	addBangumi(t, model.WebsiteBangumi{ID: "one-piece", Name: name, UpdateDay: "Mon"})
+	if result := Add(name, intPtr(0), nil, nil, nil); result.Status != "success" {
+		t.Fatalf("Add status = %q (%s)", result.Status, result.Message)
+	}
+	if err := db.Conn.SaveBangumiLink(name, 101); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Conn.SaveBangumiCollection(101, 3); err != nil {
+		t.Fatal(err)
+	}
+	if result := Delete(name, false, false); result.Status != "warning" {
+		t.Fatalf("Delete status = %q", result.Status)
+	}
+	if !deleted {
+		t.Fatal("remote Bangumi collection was not deleted")
+	}
+	if value, err := db.Conn.GetBangumiCollection(101); err != nil || value != 0 {
+		t.Fatalf("cached Bangumi collection status = %d, %v; want tombstone 0", value, err)
 	}
 }
 

@@ -33,6 +33,7 @@
     subscriptionQuery: "",
     mirrors: [],
     activeMirror: "",
+    mcp: {},
     settingsTab: "bangumi",
     calendar: {},
     timeline: { days: [], day: "" },
@@ -203,6 +204,7 @@
   let loadingTimer = null;
   let loadingCloseTimer = null;
   let loadingValue = 0;
+  let loadingController = null;
 
   function renderLoadingProgress(value) {
     const bar = document.getElementById("loading-progress");
@@ -214,6 +216,10 @@
   function showLoading(text = "加载中…") {
     if (loadingCloseTimer) { clearTimeout(loadingCloseTimer); loadingCloseTimer = null; }
     if (loadingTimer) { clearInterval(loadingTimer); loadingTimer = null; }
+    if (loadingController) {
+      try { loadingController.abort(); } catch (_) {}
+    }
+    loadingController = new AbortController();
     if (loadingText) loadingText.textContent = text;
     loadingValue = 4;
     renderLoadingProgress(loadingValue);
@@ -226,12 +232,31 @@
 
   function hideLoading() {
     if (loadingTimer) { clearInterval(loadingTimer); loadingTimer = null; }
+    loadingController = null;
     loadingValue = 100;
     renderLoadingProgress(100);
     loadingCloseTimer = setTimeout(() => {
       loadingCloseTimer = null;
       closeDialog(loadingDialog);
     }, 180);
+  }
+
+  function cancelLoading() {
+    if (loadingController) {
+      try { loadingController.abort(); } catch (_) {}
+      loadingController = null;
+    }
+    if (loadingTimer) { clearInterval(loadingTimer); loadingTimer = null; }
+    if (loadingCloseTimer) { clearTimeout(loadingCloseTimer); loadingCloseTimer = null; }
+    closeDialog(loadingDialog);
+    toast("操作已取消", "warn");
+  }
+
+  if (loadingDialog) {
+    loadingDialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      cancelLoading();
+    });
   }
 
   function openDialog(dialog) {
@@ -264,15 +289,40 @@
       }
       headers.Authorization = `Bearer ${state.token}`;
     }
-    const controller = !signal && timeout > 0 ? new AbortController() : null;
-    const fetchSignal = signal || (controller ? controller.signal : undefined);
+    const controller = new AbortController();
     let timer = null;
-    if (controller) timer = setTimeout(() => controller.abort(), timeout);
+    let timedOut = false;
+    let cancelled = false;
+    const forwardAbort = (source) => {
+      if (!source || typeof source.addEventListener !== "function") return;
+      if (source.aborted) {
+        cancelled = true;
+        controller.abort();
+        return;
+      }
+      source.addEventListener("abort", () => {
+        cancelled = true;
+        controller.abort();
+      }, { once: true });
+    };
+    forwardAbort(signal);
+    if (!signal && loadingController) forwardAbort(loadingController.signal);
+    if (timeout > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeout);
+    }
     let response;
     try {
-      response = await fetch(path, { method, headers, signal: fetchSignal, body: body !== undefined ? JSON.stringify(body) : undefined });
+      response = await fetch(path, { method, headers, signal: controller.signal, body: body !== undefined ? JSON.stringify(body) : undefined });
     } catch (err) {
-      if (err && err.name === "AbortError") throw new Error(timeout > 0 ? "请求超时，请检查网络或镜像设置" : "请求已取消");
+      if (err && err.name === "AbortError") {
+        if (timedOut) throw new Error(timeout > 0 ? "请求超时，请检查网络或镜像设置" : "请求已取消");
+        const abortError = new Error(cancelled ? "操作已取消" : "请求已取消");
+        abortError.cancelled = true;
+        throw abortError;
+      }
       throw new Error(`网络错误：${err.message}`);
     } finally {
       if (timer) clearTimeout(timer);
@@ -324,6 +374,7 @@
     try {
       await handleAction(target.dataset.action, target);
     } catch (err) {
+      if (err && err.cancelled) return;
       toast(err.message || String(err), "bad");
     }
   });
@@ -551,6 +602,13 @@
       case "player-episode":
         openPlayer(target.dataset.path, target.dataset.title, false, { ...(state.playerContext || {}), current: target.dataset.episode });
         break;
+      case "play-local-player":
+        await playLocalFile(target.dataset.path);
+        break;
+      case "player-open-window":
+        pauseVideoPlayback();
+        window.open(target.dataset.src, "_blank", "noopener,noreferrer");
+        break;
       case "kazumi-install":
         await installRule(target.dataset.name);
         break;
@@ -650,6 +708,21 @@
         break;
       case "settings-tab":
         setSettingsTab(target.dataset.tab);
+        break;
+      case "upgrade-self":
+        await upgradeSelf();
+        break;
+      case "check-upgrade":
+        await checkUpgrade();
+        break;
+      case "sync-source":
+        await syncUpgradeSource();
+        break;
+      case "toggle-mcp":
+        await toggleMCP();
+        break;
+      case "cancel-loading":
+        cancelLoading();
         break;
       default:
         break;
@@ -957,6 +1030,12 @@
     }
   }
 
+  function pauseVideoPlayback() {
+    const video = (state.player && state.player.video) || document.getElementById("player-video");
+    if (!video) return;
+    try { video.pause(); } catch (_) {}
+  }
+
   function collectGalleryImages() {
     const root = modal.open ? modalBody : view;
     return $$('[data-action="open-image"]', root)
@@ -1099,6 +1178,17 @@
     openPlayer(target.dataset.path, target.dataset.title, false, context);
   }
 
+  async function playLocalFile(path) {
+    if (!path) throw new Error("缺少本地文件路径");
+    pauseVideoPlayback();
+    const result = await api("/api/admin/play-local", {
+      method: "POST",
+      body: { path },
+      admin: true,
+    });
+    toast(`已用本地播放器打开${result.command ? `：${result.command}` : ""}`, "good", 5200);
+  }
+
   function openPlayer(path, title, absolute = false, context = null) {
     stopVideoPlayback();
     modalBody.classList.add("player-mode");
@@ -1112,8 +1202,10 @@
       src = src.split("/").map((segment, index) => index === 0 ? segment : encodeURIComponent(segment)).join("/");
     }
     const isHLS = /\.m3u8(\?|$)/i.test(src);
+    const localPath = !absolute || /^\/(?:bangumi|kazumi-files)\//.test(path) ? path : "";
+    const localButton = localPath ? `<button class="btn small" data-action="play-local-player" data-path="${esc(localPath)}">本地播放器</button>` : "";
     modalBody.innerHTML = `
-      <div class="panel-head player-head"><button class="btn small" data-action="player-back">← 返回</button><h2>${esc(title || "播放")}</h2>${contextBadge}<div class="spacer"></div><a class="btn small" href="${esc(src)}" target="_blank" rel="noopener">新窗口打开</a></div>
+      <div class="panel-head player-head"><button class="btn small" data-action="player-back">← 返回</button><h2>${esc(title || "播放")}</h2>${contextBadge}<div class="spacer"></div>${localButton}<button class="btn small" data-action="player-open-window" data-src="${esc(src)}">新窗口打开</button></div>
       <video class="player" id="player-video" controls autoplay></video>
       <p class="muted small">${isHLS ? "HLS 流媒体需要浏览器支持；已尝试使用 hls.js。" : "浏览器不支持的格式（如 MKV）请使用新窗口打开或本地播放器。"}</p>
       ${playerEpisodesTemplate(state.playerContext)}
@@ -1156,10 +1248,26 @@
   }
 
   async function deleteShow(name) {
-    if (!confirm(`确认取消订阅「${name}」？`)) return;
-    await api("/api/admin/delete", { method: "POST", body: { bangumi: name }, admin: true });
+    if (!confirm(`确认取消订阅「${name}」？同时会清除其 Bangumi 收藏状态（想看/看过/在看/搁置/抛弃）。`)) return;
+    const subjectId = state.detail.subjectId;
+    const payload = await api("/api/admin/delete", { method: "POST", body: { bangumi: name, ...(subjectId ? { subject_id: subjectId } : {}) }, admin: true });
+    if (subjectId) clearedCollections.add(subjectId);
+    clearRememberedCollection(subjectId);
+    if (state.detail) {
+      state.detail.collectionType = 0;
+      state.detail.collectionLoaded = false;
+      if (state.detail.local && state.detail.local.bangumi_name === name) {
+        state.detail.local = null;
+      }
+    }
     closeDialog(modal);
-    toast("已取消订阅", "good");
+    if (payload && payload.collection_error) {
+      toast(`已取消订阅，但清除 Bangumi 收藏失败：${payload.collection_error}`, "warn", 7000);
+    } else if (payload && Number(payload.subject_id || 0) > 0) {
+      toast("已取消订阅，并已清除 Bangumi 收藏状态", "good", 5200);
+    } else {
+      toast("已取消订阅", "good");
+    }
     await renderRoute(true);
   }
 
@@ -1256,7 +1364,17 @@
   }
 
   async function fetchArchive(path) {
-    const response = await fetch(path, { headers: archiveHeaders() });
+    let response;
+    try {
+      response = await fetch(path, { headers: archiveHeaders(), signal: loadingController ? loadingController.signal : undefined });
+    } catch (err) {
+      if (err && err.name === "AbortError") {
+        const cancelled = new Error("操作已取消");
+        cancelled.cancelled = true;
+        throw cancelled;
+      }
+      throw err;
+    }
     if (response.status === 403) {
       openTokenDialog();
       throw new Error("管理令牌无效，请重新设置");
@@ -1300,11 +1418,22 @@
   }
 
   async function uploadArchive(path, file) {
-    const response = await fetch(path, {
-      method: "POST",
-      headers: { ...archiveHeaders(), "Content-Type": "application/zip" },
-      body: file,
-    });
+    let response;
+    try {
+      response = await fetch(path, {
+        method: "POST",
+        headers: { ...archiveHeaders(), "Content-Type": "application/zip" },
+        body: file,
+        signal: loadingController ? loadingController.signal : undefined,
+      });
+    } catch (err) {
+      if (err && err.name === "AbortError") {
+        const cancelled = new Error("操作已取消");
+        cancelled.cancelled = true;
+        throw cancelled;
+      }
+      throw err;
+    }
     if (response.status === 403) {
       openTokenDialog();
       throw new Error("管理令牌无效，请重新设置");
@@ -1985,6 +2114,7 @@
   // background prefetches for the adjacent cards, so previous/next remains
   // instant after the browse cache has been refreshed.
   const detailMemory = new Map();
+  const clearedCollections = new Set();
   const detailMemoryTTL = 5 * 60 * 1000;
   const detailPrefetching = new Set();
 
@@ -2016,6 +2146,17 @@
     const entry = id ? detailMemory.get(id) : null;
     if (!entry) return;
     entry.sections = { ...(entry.sections || {}), [tab]: payload };
+    entry.at = Date.now();
+  }
+
+  function clearRememberedCollection(subjectId) {
+    const id = Number(subjectId || 0);
+    if (!id) return;
+    const entry = detailMemory.get(id);
+    if (!entry || !entry.subject) return;
+    const subject = { ...entry.subject, collection_type: 0 };
+    delete subject.subscription;
+    entry.subject = subject;
     entry.at = Date.now();
   }
 
@@ -2069,9 +2210,12 @@
 
   async function openSubjectDetail(options = {}) {
     modalBody.classList.remove("player-mode");
-    const local = options.local || null;
+    let local = options.local || null;
     const name = String(options.name || (local && local.bangumi_name) || (local && local.name) || "").trim();
     const subjectId = Number(options.subjectId || 0);
+    if (subjectId && clearedCollections.has(subjectId)) {
+      local = null;
+    }
     const navItems = Array.isArray(options.navItems) ? options.navItems : [];
     let navIndex = Number(options.navIndex);
     if (!Number.isInteger(navIndex) || navIndex < 0 || navIndex >= navItems.length) navIndex = -1;
@@ -2206,9 +2350,14 @@
     const subject = payload.subject || null;
     state.detail.subject = subject;
     if (payload.subject_id) state.detail.subjectId = Number(payload.subject_id);
-    if (subject && subject.subscription) {
+    const cleared = clearedCollections.has(Number(state.detail.subjectId));
+    if (subject && subject.subscription && !cleared) {
       const current = state.detail.local || {};
       state.detail.local = { ...current, ...subject.subscription };
+    }
+    if (cleared) {
+      state.detail.collectionType = 0;
+      return;
     }
     const collectionType = Number(subject && subject.collection_type || payload.collection_type || 0);
     if (collectionType > 0) state.detail.collectionType = collectionType;
@@ -2509,11 +2658,17 @@
   }
 
   async function loadCollectionType(subjectId, signal = null) {
+    if (clearedCollections.has(Number(subjectId))) {
+      state.detail.collectionType = 0;
+      state.detail.collectionLoaded = true;
+      renderDetail();
+      return;
+    }
     try {
       const payload = await api(`/api/admin/bangumi/collection/${subjectId}`, { admin: true, signal });
       if (state.detail.subjectId !== subjectId) return;
       const type = Number(payload.type || 0);
-      if (type > 0) state.detail.collectionType = type;
+      state.detail.collectionType = type;
       state.detail.collectionLoaded = true;
       renderDetail();
     } catch (_) {}
@@ -2521,9 +2676,41 @@
 
   async function setCollection(type) {
     if (!state.detail.subjectId) return;
-    await api("/api/admin/bangumi/collection", { method: "POST", body: { subject_id: state.detail.subjectId, type }, admin: true });
+    const alreadySubscribed = !!(state.detail.autoSubscribed || (state.detail.local && state.detail.local.bangumi_name));
+    const shouldAutoSubscribe = state.route !== "subscriptions" && !alreadySubscribed;
+    const localName = state.detail.local && state.detail.local.bangumi_name;
+    await api("/api/admin/bangumi/collection", {
+      method: "POST",
+      body: { subject_id: state.detail.subjectId, type, ...(localName ? { name: localName } : {}) },
+      admin: true,
+    });
+    if (state.detail.subjectId) clearedCollections.delete(state.detail.subjectId);
     state.detail.collectionType = type;
     state.detail.collectionLoaded = true;
+    let addError = "";
+    let addCancelled = false;
+    if (shouldAutoSubscribe) {
+      showLoading("正在添加到订阅…");
+      try {
+        const payload = await api("/api/admin/add", {
+          method: "POST",
+          body: { bgm_id: state.detail.subjectId },
+          admin: true,
+        });
+        const subscribedName = payload.bangumi_name || state.detail.name || detailName() || "";
+        state.detail.autoSubscribed = true;
+        state.detail.local = {
+          ...(state.detail.local || {}),
+          bangumi_name: subscribedName,
+          collection_type: type,
+        };
+      } catch (err) {
+        if (err && err.cancelled) addCancelled = true;
+        else addError = err.message || String(err);
+      } finally {
+        hideLoading();
+      }
+    }
     const name = state.detail.local && state.detail.local.bangumi_name;
     if (name) {
       for (const item of state.subscriptions) {
@@ -2532,7 +2719,15 @@
       if (state.route === "subscriptions") renderSubscriptionList();
     }
     renderDetail();
-    toast(`已同步为「${(collectionTypes.find((item) => item[0] === type) || [0, type])[1]}」`, "good");
+    if (addCancelled) return;
+    const label = (collectionTypes.find((item) => item[0] === type) || [0, type])[1];
+    if (addError) {
+      toast(`已同步为「${label}」，但自动添加订阅失败：${addError}`, "warn", 6000);
+    } else if (shouldAutoSubscribe) {
+      toast(`已同步为「${label}」并添加到订阅`, "good", 5200);
+    } else {
+      toast(`已同步为「${label}」`, "good");
+    }
   }
 
   async function linkBangumi() {
@@ -2594,7 +2789,7 @@
         <div class="spacer"></div>
         <button class="btn small" data-action="watch-online" data-name="${esc(name)}">在线搜索更多来源</button>
       </div>
-      <p class="muted small">直接播放 Kazumi Files / 本地目录中已经下载好的剧集，不再进行在线搜索。</p>
+      <p class="muted small">直接播放 Kazumi Files / 本地目录中已经下载好的剧集，不再进行在线搜索。播放器顶部可选择「本地播放器」弹出到 mpv / VLC 等外部播放器。</p>
       <div class="episode-grid">${episodes.map((episode) => {
         const entry = local.player[episode] || {};
         return `<button class="episode-btn" data-action="play-episode" data-episode="${esc(episode)}" data-title="${esc(name)} EP${esc(episode)}" data-path="${esc(entry.path || "")}">第 ${esc(episode)} 集</button>`;
@@ -3521,27 +3716,82 @@
   async function renderSettings() {
     setActions("");
     view.innerHTML = `<div class="two-col">${loadingCards(2)}</div>`;
+    const upgradeRequest = api("/api/admin/upgrade", { admin: true, timeout: 45000 })
+      .then((status) => status || {})
+      .catch((err) => ({ error: err.message || String(err) }));
     Promise.allSettled([
       api("/api/admin/bangumi/sync", { admin: true }),
       api("/api/admin/webdav", { admin: true }),
       api("/api/admin/kazumi/settings", { admin: true }),
       api("/api/index/index"),
-    ]).then(([syncRes, webdavRes, kazumiRes, indexRes]) => {
+      api("/api/admin/http/settings", { admin: true }),
+    ]).then(([syncRes, webdavRes, kazumiRes, indexRes, mcpRes]) => {
       if (state.route !== "settings") return;
       const sync = syncRes.status === "fulfilled" ? syncRes.value : {};
       const webdavStatus = webdavRes.status === "fulfilled" ? webdavRes.value : {};
       const kazumiSettings = kazumiRes.status === "fulfilled" ? kazumiRes.value : { bangumi_mirrors: [], bangumi_mirror: "" };
       const indexPayload = indexRes.status === "fulfilled" ? indexRes.value : {};
+      state.mcp = mcpRes.status === "fulfilled" ? mcpRes.value : {};
       state.version = indexPayload.version || state.version;
       state.mirrors = [...(kazumiSettings.bangumi_mirrors || state.mirrors || [])];
       state.activeMirror = kazumiSettings.bangumi_mirror || state.mirrors[0] || "";
-      view.innerHTML = renderSettingsHTML(sync, webdavStatus, kazumiSettings);
+      view.innerHTML = renderSettingsHTML(sync, webdavStatus, kazumiSettings, { checking: true }, state.mcp);
+      upgradeRequest.then((upgradeStatus) => {
+        if (state.route !== "settings") return;
+        const node = document.getElementById("upgrade-info");
+        if (node) node.innerHTML = upgradeInfoHTML(upgradeStatus);
+      });
     }).catch((err) => {
       if (state.route === "settings") view.innerHTML = emptyState("!", err.message || String(err));
     });
   }
 
-  function renderSettingsHTML(sync = {}, webdavStatus = {}, kazumiSettings = {}) {
+  function upgradeInfoHTML(status = {}) {
+    let action = "";
+    if (status.checking) {
+      action = '<span class="badge muted">检查中…</span>';
+    } else {
+      const check = '<button class="btn small" data-action="check-upgrade">检查更新</button>';
+      if (status.go_available === false) {
+        action = `${check}<span class="badge warn">需要安装 Go</span>`;
+      } else if (status.go_available) {
+        const label = status.updatable ? `升级到 ${esc(status.latest)}` : "重新安装";
+        action = `${check}<select id="upgrade-mode" class="upgrade-mode" title="选择升级方式"><option value="remote">远程 go install</option><option value="local">本地源码</option></select><button class="btn small primary" data-action="upgrade-self">${label}</button>`;
+      } else {
+        action = check;
+      }
+    }
+    const latest = status.latest ? ` · 最新 ${esc(status.latest)}` : "";
+    const checkError = status.error ? ` · 检查失败：${esc(status.error)}` : "";
+    const goState = !status.checking && !status.error && status.go_available === false ? " · 未检测到 Go" : "";
+    const installPath = status.install_path ? ` · 安装到 <span class="mono">${esc(status.install_path)}</span>` : "";
+    const sourceVersion = status.source_ready ? (status.source_version || "未知版本") : "未同步";
+    const sourceActions = `${status.source_ready ? '<span class="badge good">本地可用</span>' : '<span class="badge muted">未同步</span>'}<button class="btn small" data-action="sync-source">同步源码</button>`;
+    return `<div class="row"><div class="grow"><div class="title">版本</div><div class="sub">uani ${esc(state.version)}${latest}${checkError}</div></div><div class="actions">${action}</div></div>
+              <div class="row"><div class="grow"><div class="title">指定版本</div><div class="sub">留空安装最新版；可填写 v1.2.3 或分支名</div></div><input id="upgrade-version" type="text" style="max-width:180px" placeholder="latest" /></div>
+              <div class="row"><div class="grow"><div class="title">升级方式</div><div class="sub"><span class="mono">go install github.com/HanamiSakiP/u-ani/cmd/uani@latest</span>${installPath}${goState}</div></div></div>
+              <div class="row"><div class="grow"><div class="title">源码目录</div><div class="sub"><span class="mono">${esc(status.source_path || "")}</span> · ${esc(sourceVersion)}</div></div><div class="actions">${sourceActions}</div></div>`;
+  }
+
+  function mcpSettingsHTML(status = {}) {
+    const known = typeof status.mcp_enabled === "boolean";
+    const enabled = !!status.mcp_enabled;
+    const toggleable = !!status.mcp_toggle;
+    let action = "";
+    if (!known) {
+      action = '<span class="badge muted">状态未知</span>';
+    } else {
+      action = `<span class="badge ${enabled ? "good" : "muted"}">${enabled ? "已启用" : "已关闭"}</span>`;
+      if (toggleable) {
+        action += `<button class="btn small ${enabled ? "danger" : "primary"}" data-action="toggle-mcp">${enabled ? "关闭 MCP" : "启用 MCP"}</button>`;
+      } else {
+        action += '<span class="badge muted">启动参数锁定</span>';
+      }
+    }
+    return `<div class="row"><div class="grow"><div class="title">MCP</div><div class="sub"><span class="mono">/mcp</span> · <span class="mono">/mcp/sse</span> · 修改后立即生效并写入 config.toml</div></div><div class="actions">${action}</div></div>`;
+  }
+
+  function renderSettingsHTML(sync = {}, webdavStatus = {}, kazumiSettings = {}, upgradeStatus = {}, mcpStatus = {}) {
     return `
       <div class="two-col">
         <div>
@@ -3616,12 +3866,12 @@
 
         <div>
           <section class="panel">
-            <div class="panel-head"><h2>运行信息</h2></div>
+            <div class="panel-head"><h2>运行信息与升级</h2></div>
+            <div class="list" id="upgrade-info">${upgradeInfoHTML(upgradeStatus)}</div>
             <div class="list">
-              <div class="row"><div class="grow"><div class="title">版本</div><div class="sub">uani ${esc(state.version)}</div></div></div>
               <div class="row"><div class="grow"><div class="title">前端</div><div class="sub">内置 Web UI</div></div></div>
               <div class="row"><div class="grow"><div class="title">日历订阅</div><div class="sub"><a class="mono" href="/resource/calendar.ics" target="_blank">/resource/calendar.ics</a></div></div></div>
-              <div class="row"><div class="grow"><div class="title">MCP</div><div class="sub"><span class="mono">/mcp</span> · <span class="mono">/mcp/sse</span></div></div></div>
+              <div id="mcp-settings">${mcpSettingsHTML(mcpStatus)}</div>
               <div class="row"><div class="grow"><div class="title">缓存</div><div class="sub">导出 / 导入番剧详情、吐槽与 Kazumi 时间表/推荐缓存；清理只影响缓存，保留追番、订阅与下载信息</div></div><div class="actions"><button class="btn small" data-action="export-cache">导出缓存</button><button class="btn small" data-action="import-cache">导入缓存</button><button class="btn small danger" data-action="clear-detail-cache">清理缓存</button></div></div>
             </div>
           </section>
@@ -3632,6 +3882,100 @@
         </div>
       </div>
     `;
+  }
+
+  async function toggleMCP() {
+    if (!state.mcp || !state.mcp.mcp_toggle) {
+      toast("MCP 已被启动参数锁定，无法在 Web 中修改", "warn", 6000);
+      return;
+    }
+    const enabled = !!state.mcp.mcp_enabled;
+    showLoading(enabled ? "正在关闭 MCP…" : "正在启动 MCP…");
+    try {
+      const result = await api("/api/admin/http/settings", {
+        method: "PATCH",
+        body: { mcp_enabled: !enabled },
+        admin: true,
+      });
+      state.mcp = result;
+      const node = document.getElementById("mcp-settings");
+      if (node) node.innerHTML = mcpSettingsHTML(result);
+      toast(result.mcp_enabled ? "MCP 已启动" : "MCP 已关闭", "good");
+    } catch (err) {
+      if (!(err && err.cancelled)) toast(err.message || String(err), "bad", 6000);
+    } finally {
+      hideLoading();
+    }
+  }
+
+  function applyUpgradeStatus(status = {}) {
+    const node = document.getElementById("upgrade-info");
+    if (node) node.innerHTML = upgradeInfoHTML(status);
+  }
+
+  async function checkUpgrade() {
+    showLoading("正在检查 uani 更新…");
+    try {
+      const status = await api("/api/admin/upgrade", { admin: true, timeout: 45000 });
+      applyUpgradeStatus(status || {});
+      if (status && status.error) toast(`检查更新失败：${status.error}`, "warn", 6000);
+      else if (status && status.updatable) toast(`发现新版本 ${status.latest}`, "good");
+      else toast("已是最新版本", "good");
+    } catch (err) {
+      if (!(err && err.cancelled)) toast(err.message || String(err), "bad", 6000);
+    } finally {
+      hideLoading();
+    }
+  }
+
+  async function syncUpgradeSource() {
+    showLoading("正在同步 uani 源码…");
+    try {
+      const result = await api("/api/admin/upgrade/source", {
+        method: "POST",
+        body: { version: "latest" },
+        admin: true,
+        timeout: 600000,
+      });
+      toast(`源码 ${result.version} 已同步到 ${result.path}`, "good", 6000);
+      const status = await api("/api/admin/upgrade", { admin: true, timeout: 45000 });
+      applyUpgradeStatus(status || {});
+    } catch (err) {
+      if (!(err && err.cancelled)) toast(err.message || String(err), "bad", 6000);
+    } finally {
+      hideLoading();
+    }
+  }
+
+  async function upgradeSelf() {
+    const modeSelect = document.getElementById("upgrade-mode");
+    const mode = modeSelect ? modeSelect.value : "remote";
+    const versionInput = document.getElementById("upgrade-version");
+    const version = (versionInput && versionInput.value.trim()) || "latest";
+    const local = mode === "local";
+    const prompt = local
+      ? `将从本地源码构建并安装 uani ${version}，升级完成后需要重启 uani http。继续吗？`
+      : `将通过 go install 升级 uani 到 ${version}，升级完成后需要重启 uani http。继续吗？`;
+    if (!confirm(prompt)) return;
+    showLoading(local ? "正在从本地源码构建 uani…" : "正在通过 go install 升级 uani…");
+    try {
+      const result = await api("/api/admin/upgrade", {
+        method: "POST",
+        body: { mode, version },
+        admin: true,
+        timeout: 900000,
+      });
+      hideLoading();
+      const installed = result.version ? `uani ${result.version}` : "uani";
+      const path = result.path ? `已安装到 ${result.path}。` : "";
+      const source = result.source_error ? `源码同步失败：${result.source_error}。` : (result.source_version ? `源码已同步到 ${result.source_version}。` : "");
+      const migration = result.migration_error ? `数据库迁移失败：${result.migration_error}。` : "";
+      const warn = result.source_error || result.migration_error;
+      showNotice("升级完成", `${installed} ${path}${source}${migration}重启 uani http 后生效。`, warn ? "warn" : "good");
+    } catch (err) {
+      hideLoading();
+      toast(err.message || String(err), "bad", 8000);
+    }
   }
 
   async function saveBangumiSettings() {

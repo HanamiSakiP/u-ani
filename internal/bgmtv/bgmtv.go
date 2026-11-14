@@ -29,7 +29,7 @@ var APIBase = "https://api.bgm.tv"
 // fallback the 吐槽 tab can never load.
 var publicNextMirror = "https://next.bangumi.lat"
 
-const userAgent = "uani/1.0.0 (https://github.com/HanamiSakiP/u-ani)"
+const userAgent = "uani/1.0.1 (https://github.com/HanamiSakiP/u-ani)"
 
 var (
 	subjectIDPattern   = regexp.MustCompile(`(?i)(?:bgm\.tv|bangumi\.tv)/subject/(\d+)`)
@@ -581,6 +581,23 @@ func UpdateCollection(subjectID int, token string, collectionType int) error {
 	}
 	target := fmt.Sprintf("%s/v0/users/-/collections/%d", authAPIBase(), subjectID)
 	return postJSONAuth(target, token, map[string]any{"type": collectionType})
+}
+
+// DeleteCollection removes a subject from the user's Bangumi collection.
+func DeleteCollection(subjectID int, token string) error {
+	if subjectID <= 0 {
+		return fmt.Errorf("invalid Bangumi subject id %d", subjectID)
+	}
+	if strings.TrimSpace(token) == "" {
+		return fmt.Errorf("Bangumi Access Token should not be empty")
+	}
+	target := fmt.Sprintf("%s/v0/users/-/collections/%d", authAPIBase(), subjectID)
+	err := doJSON(http.MethodDelete, target, nil, token, nil)
+	// A subject that is not in the collection is already in the desired state.
+	if err != nil && strings.Contains(err.Error(), "HTTP 404") {
+		return nil
+	}
+	return err
 }
 
 func (c *Collection) normalize() {

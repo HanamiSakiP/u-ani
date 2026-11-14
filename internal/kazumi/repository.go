@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	repoUserAgent = "uani/1.0.0 (Kazumi rule repository; +https://github.com/HanamiSakiP/u-ani)"
+	repoUserAgent = "uani/1.0.1 (Kazumi rule repository; +https://github.com/HanamiSakiP/u-ani)"
 	maxRuleBytes  = 8 << 20
 	metaFileName  = ".meta.json"
 )

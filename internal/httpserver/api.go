@@ -668,6 +668,18 @@ func adminRouter(w http.ResponseWriter, r *http.Request, path string) {
 		adminCacheExport(w, r)
 	case r.Method == http.MethodPost && path == "cache/import":
 		adminCacheImport(w, r)
+	case r.Method == http.MethodGet && path == "upgrade":
+		adminUpgradeStatus(w, r)
+	case r.Method == http.MethodPost && path == "upgrade":
+		adminUpgrade(w, r)
+	case r.Method == http.MethodPost && path == "upgrade/source":
+		adminSyncSource(w, r)
+	case r.Method == http.MethodPost && path == "play-local":
+		adminPlayLocal(w, r)
+	case r.Method == http.MethodGet && path == "http/settings":
+		adminHTTPSettings(w, r)
+	case r.Method == http.MethodPatch && path == "http/settings":
+		adminPatchHTTPSettings(w, r)
 	case strings.HasPrefix(path, "bangumi/"):
 		adminBangumiRouter(w, r, strings.TrimPrefix(path, "bangumi/"))
 	case strings.HasPrefix(path, "webdav"):
@@ -717,7 +729,7 @@ func adminAdd(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, result.Message)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{})
+		writeJSON(w, http.StatusOK, addResultPayload(result))
 		return
 	}
 
@@ -736,12 +748,24 @@ func adminAdd(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, result.Message)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{})
+	writeJSON(w, http.StatusOK, addResultPayload(result))
+}
+
+func addResultPayload(result controllers.Result) map[string]any {
+	payload := map[string]any{
+		"status":  result.Status,
+		"message": result.Message,
+	}
+	for key, value := range result.Data {
+		payload[key] = value
+	}
+	return payload
 }
 
 type deleteRequest struct {
-	Bangumi *string `json:"bangumi"`
-	Name    *string `json:"name"`
+	Bangumi   *string `json:"bangumi"`
+	Name      *string `json:"name"`
+	SubjectID *int    `json:"subject_id"`
 }
 
 func adminDelete(w http.ResponseWriter, r *http.Request) {
@@ -770,7 +794,20 @@ func adminDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{})
+	var subjectID int
+	var clearErr error
+	if body.SubjectID != nil && *body.SubjectID > 0 {
+		subjectID = *body.SubjectID
+		_ = db.Conn.SaveBangumiLink(name, subjectID)
+		clearErr = controllers.ClearBangumiCollection(subjectID)
+	} else {
+		subjectID, clearErr = controllers.ClearSubscriptionCollection(name)
+	}
+	payload := map[string]any{"subject_id": subjectID}
+	if clearErr != nil {
+		payload["collection_error"] = clearErr.Error()
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 type updateRequest struct {

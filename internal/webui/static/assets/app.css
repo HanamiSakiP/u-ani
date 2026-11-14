@@ -163,6 +163,7 @@ input:focus, select:focus, textarea:focus {
   border-color: rgba(139,124,255,.6);
   box-shadow: 0 0 0 3px rgba(139,124,255,.14);
 }
+.upgrade-mode { width: auto; min-width: 132px; padding: 7px 10px; }
 textarea { resize: vertical; min-height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.55; }
 .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .toolbar .grow { flex: 1; min-width: 180px; }

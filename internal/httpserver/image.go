@@ -45,7 +45,7 @@ func handleImage(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make(chan imageResult, len(targets))
 	headers := map[string]string{
-		"User-Agent":    "uani/1.0.0 (image proxy)",
+		"User-Agent":    "uani/1.0.1 (image proxy)",
 		"Accept":        "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
 		"Cache-Control": "max-age=604800",
 		"Referer":       "https://bgm.tv/",

@@ -32,6 +32,7 @@ func CreateDir() error {
 		config.Cfg.ScriptPath,
 		config.Cfg.ToolsPath,
 		config.Cfg.FrontStaticPath,
+		filepath.Join(config.UANIHome, "source"),
 		filepath.Join(config.Cfg.CachePath, "covers"),
 		filepath.Join(config.Cfg.CachePath, "kazumi"),
 	}

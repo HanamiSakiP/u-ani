@@ -599,7 +599,7 @@ func TestBangumiMirror(value string) (int, time.Duration, error) {
 			cancel()
 			return 0, time.Since(start), err
 		}
-		req.Header.Set("User-Agent", "uani/1.0.0 (mirror test)")
+		req.Header.Set("User-Agent", "uani/1.0.1 (mirror test)")
 		req.Header.Set("Accept", "application/json")
 		resp, err := httpx.Client().Do(req)
 		if err != nil {
@@ -652,7 +652,7 @@ func TestBangumiMirror(value string) (int, time.Duration, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/p1/subjects/253/comments?limit=1&offset=0", nil)
 	if err == nil {
-		req.Header.Set("User-Agent", "uani/1.0.0 (mirror test)")
+		req.Header.Set("User-Agent", "uani/1.0.1 (mirror test)")
 		req.Header.Set("Accept", "application/json")
 		if resp, err := httpx.Client().Do(req); err == nil {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

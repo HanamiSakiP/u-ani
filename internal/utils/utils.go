@@ -126,7 +126,7 @@ func downloadCoverBytes(rawURL string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	resp, err := kazumi.Get(ctx, target, map[string]string{
-		"User-Agent": "uani/1.0.0 (https://github.com/HanamiSakiP/u-ani)",
+		"User-Agent": "uani/1.0.1 (https://github.com/HanamiSakiP/u-ani)",
 	}, mode == kazumi.ImageAccelerationECH && kazumi.IsBangumiImage(rawURL))
 	if err != nil {
 		return nil, err

@@ -15,7 +15,7 @@ import (
 )
 
 // Version is the BGmi-compatible version.
-const Version = "1.0.0"
+const Version = "1.0.1"
 
 type Source string
 
@@ -77,6 +77,11 @@ type HTTPConfig struct {
 	DisableMCP       bool   `toml:"disable_mcp" json:"disable_mcp"`
 }
 
+// PlayerConfig controls the optional external/local video player.
+type PlayerConfig struct {
+	Command string `toml:"command" json:"command"`
+}
+
 // KazumiConfig contains the Kazumi rule repository and the same acceleration
 // switches used by the official Kazumi client.
 type KazumiConfig struct {
@@ -136,6 +141,7 @@ type Config struct {
 	MikanPassword string `toml:"mikan_password" json:"mikan_password"`
 
 	HTTP    HTTPConfig    `toml:"http" json:"http"`
+	Player  PlayerConfig  `toml:"player" json:"player"`
 	Kazumi  KazumiConfig  `toml:"kazumi" json:"kazumi"`
 	Bangumi BangumiConfig `toml:"bangumi" json:"bangumi"`
 	WebDAV  WebDAVConfig  `toml:"webdav" json:"webdav"`
@@ -259,6 +265,9 @@ func defaultConfig() Config {
 			ServeStaticFiles: envBool("UANI_HTTP_SERVE_STATIC_FILES", false),
 			DisableWeb:       envBool("UANI_HTTP_DISABLE_WEB", false),
 			DisableMCP:       envBool("UANI_HTTP_DISABLE_MCP", false),
+		},
+		Player: PlayerConfig{
+			Command: env("UANI_PLAYER_COMMAND", ""),
 		},
 		Kazumi: KazumiConfig{
 			RuleRepository:      env("UANI_KAZUMI_RULE_REPOSITORY", ""),
@@ -469,6 +478,7 @@ func EnsureDirs() error {
 		Cfg.ScriptPath,
 		Cfg.ToolsPath,
 		Cfg.FrontStaticPath,
+		filepath.Join(UANIHome, "source"),
 		filepath.Join(UANIHome, "kazumi", "rules"),
 		filepath.Join(Cfg.SavePath, "kazumi"),
 		filepath.Join(Cfg.CachePath, "covers"),

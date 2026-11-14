@@ -541,9 +541,22 @@ func enrichSubjectPayload(subjectID int, payload map[string]any) map[string]any 
 			"aliases":         aliases,
 			"custom_aliases":  customAliases,
 		}
+	} else {
+		// The cached subject payload may predate an unsubscribe. Do not let a
+		// stale subscription object resurrect the "subscribed" badge.
+		delete(payload, "subscription")
+		if db.Conn.HasDeletedFollowedBySubjectID(subjectID) {
+			// Also tombstone the collection cache so the old status cannot be
+			// served from cache or fetched back from the remote API.
+			_ = db.Conn.SaveBangumiCollection(subjectID, 0)
+		}
 	}
 	if value, cached, _ := controllers.GetBangumiCollection(subjectID); cached && value > 0 {
 		payload["collection_type"] = value
+	} else {
+		// Likewise, cached subject payloads may still contain an old
+		// collection_type after the user unsubscribed.
+		delete(payload, "collection_type")
 	}
 	return payload
 }
@@ -744,8 +757,9 @@ func adminBangumiCollection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		SubjectID int `json:"subject_id"`
-		Type      int `json:"type"`
+		SubjectID int    `json:"subject_id"`
+		Type      int    `json:"type"`
+		Name      string `json:"name"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -754,6 +768,9 @@ func adminBangumiCollection(w http.ResponseWriter, r *http.Request) {
 	if err := controllers.SetBangumiCollection(body.SubjectID, body.Type); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if name := strings.TrimSpace(body.Name); name != "" {
+		_ = db.Conn.SaveBangumiLink(name, body.SubjectID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"subject_id": body.SubjectID, "type": body.Type})
 }

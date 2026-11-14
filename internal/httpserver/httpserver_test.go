@@ -268,6 +268,48 @@ func TestAPIPlayerFormatted(t *testing.T) {
 	}
 }
 
+func TestPlayerCommandLine(t *testing.T) {
+	parts := splitCommandLine(`"C:\Program Files\mpv\mpv.exe" --fullscreen {path}`)
+	if len(parts) != 3 || parts[0] != `C:\Program Files\mpv\mpv.exe` || parts[1] != "--fullscreen" || parts[2] != "{path}" {
+		t.Fatalf("splitCommandLine() = %#v", parts)
+	}
+	args := withPlayerPath(parts[1:], `C:\Videos\EP1.mkv`)
+	if len(args) != 2 || args[1] != `C:\Videos\EP1.mkv` {
+		t.Fatalf("withPlayerPath() = %#v", args)
+	}
+	args = withPlayerPath([]string{"--fullscreen"}, "/tmp/EP1.mkv")
+	if len(args) != 2 || args[1] != "/tmp/EP1.mkv" {
+		t.Fatalf("withPlayerPath(append) = %#v", args)
+	}
+}
+
+func TestResolveLocalMedia(t *testing.T) {
+	dir := setupHTTPTest(t)
+	video := filepath.Join(dir, "bangumi", "Show", "EP1.mkv")
+	if err := os.MkdirAll(filepath.Dir(video), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(video, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveLocalMedia("/bangumi/Show/EP1.mkv")
+	if err != nil {
+		t.Fatalf("resolveLocalMedia() error = %v", err)
+	}
+	if got != video {
+		t.Fatalf("resolveLocalMedia() = %q, want %q", got, video)
+	}
+	if _, err := resolveLocalMedia("/bangumi/../secret.mkv"); err == nil {
+		t.Fatal("path traversal should be rejected")
+	}
+	if _, err := resolveLocalMedia("https://example.com/video.mp4"); err == nil {
+		t.Fatal("remote URLs should be rejected")
+	}
+	if _, err := resolveLocalMedia("/bangumi/Show/missing.mkv"); err == nil {
+		t.Fatal("missing files should be rejected")
+	}
+}
+
 func TestAdminAddBgmTVSubject(t *testing.T) {
 	setupHTTPTest(t)
 	if err := db.Conn.SaveBangumi(model.WebsiteBangumi{
@@ -300,9 +342,96 @@ func TestAdminAddBgmTVSubject(t *testing.T) {
 		resp.Body.Close()
 		t.Fatalf("add bgm.tv status = %d: %s", resp.StatusCode, body)
 	}
-	resp.Body.Close()
+	body := decodeJSON(t, resp)
+	if body["bangumi_name"] != "Test Anime" {
+		t.Fatalf("add response bangumi_name = %v", body["bangumi_name"])
+	}
 	if _, err := db.Conn.GetFollowed("Test Anime"); err != nil {
 		t.Fatalf("bgm.tv subject was not followed: %v", err)
+	}
+}
+
+func TestAdminUpgradeRequiresAuth(t *testing.T) {
+	setupHTTPTest(t)
+	server := httptest.NewServer(Handler())
+	defer server.Close()
+
+	resp := request(t, server, http.MethodGet, "/api/admin/upgrade", nil, "")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("unauthorized upgrade status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = request(t, server, http.MethodPost, "/api/admin/upgrade", map[string]any{"version": "../bad"}, testToken)
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("invalid upgrade target status = %d", resp.StatusCode)
+	}
+	body := decodeJSON(t, resp)
+	if !strings.Contains(fmt.Sprint(body["detail"]), "invalid target") {
+		t.Fatalf("unexpected error: %v", body)
+	}
+}
+
+func TestAdminDeleteClearsCollection(t *testing.T) {
+	setupHTTPTest(t)
+	oldToken := config.Cfg.Bangumi.AccessToken
+	config.Cfg.Bangumi.AccessToken = ""
+	t.Cleanup(func() { config.Cfg.Bangumi.AccessToken = oldToken })
+	seedBangumi(t, "Test Anime", 0)
+	if err := db.Conn.SaveBangumiLink("Test Anime", 101); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Conn.SaveBangumiCollection(101, 3); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(Handler())
+	defer server.Close()
+	resp := request(t, server, http.MethodPost, "/api/admin/delete", map[string]any{"bangumi": "Test Anime"}, testToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete status = %d", resp.StatusCode)
+	}
+	body := decodeJSON(t, resp)
+	if id, _ := body["subject_id"].(float64); id != 101 {
+		t.Fatalf("delete subject_id = %v", body["subject_id"])
+	}
+	if value, err := db.Conn.GetBangumiCollection(101); err != nil || value != 0 {
+		t.Fatalf("cached collection status = %d, %v; want tombstone 0", value, err)
+	}
+}
+
+func TestEnrichSubjectPayloadClearsStaleCollection(t *testing.T) {
+	setupHTTPTest(t)
+	oldToken := config.Cfg.Bangumi.AccessToken
+	config.Cfg.Bangumi.AccessToken = ""
+	t.Cleanup(func() { config.Cfg.Bangumi.AccessToken = oldToken })
+	seedBangumi(t, "Test Anime", 0)
+	if err := db.Conn.SaveBangumiLink("Test Anime", 101); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Conn.SaveBangumiCollection(101, 3); err != nil {
+		t.Fatal(err)
+	}
+	followed, err := db.Conn.GetFollowed("Test Anime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	followed.Status = db.FollowedStatusDeleted
+	if err := db.Conn.SaveFollowed(followed); err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]any{
+		"collection_type": 3,
+		"subscription":    map[string]any{"bangumi_name": "Test Anime"},
+	}
+	got := enrichSubjectPayload(101, payload)
+	if _, ok := got["collection_type"]; ok {
+		t.Fatalf("stale collection_type was not removed: %v", got["collection_type"])
+	}
+	if _, ok := got["subscription"]; ok {
+		t.Fatalf("stale subscription was not removed: %v", got["subscription"])
+	}
+	if value, err := db.Conn.GetBangumiCollection(101); err != nil || value != 0 {
+		t.Fatalf("collection cache = %d, %v; want tombstone 0", value, err)
 	}
 }
 
@@ -1002,6 +1131,49 @@ func TestBangumiCollectionSwitch(t *testing.T) {
 	if body["type"] != float64(4) || body["cached"] != true {
 		t.Fatalf("collection response = %v", body)
 	}
+}
+
+func TestMCPSettingsToggle(t *testing.T) {
+	dir := setupHTTPTest(t)
+	oldConfigPath := config.ConfigFilePath
+	config.ConfigFilePath = filepath.Join(dir, "config.toml")
+	t.Cleanup(func() { config.ConfigFilePath = oldConfigPath })
+
+	server := httptest.NewServer(HandlerWithOptions(Options{Web: true, MCP: true, MCPToggle: true}))
+	defer server.Close()
+
+	resp := request(t, server, http.MethodGet, "/api/admin/http/settings", nil, testToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("http settings status = %d", resp.StatusCode)
+	}
+	settings := decodeJSON(t, resp)
+	if settings["mcp_enabled"] != true || settings["mcp_toggle"] != true {
+		t.Fatalf("unexpected initial MCP settings: %v", settings)
+	}
+
+	resp = request(t, server, http.MethodPatch, "/api/admin/http/settings", map[string]any{"mcp_enabled": false}, testToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("disable MCP status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = request(t, server, http.MethodGet, "/mcp", nil, "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("disabled /mcp status = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = request(t, server, http.MethodPatch, "/api/admin/http/settings", map[string]any{"mcp_enabled": true}, testToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("enable MCP status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = request(t, server, http.MethodGet, "/mcp", nil, "")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("enabled /mcp status = %d, want 401", resp.StatusCode)
+	}
+	resp.Body.Close()
 }
 
 func TestHandlerOptionsDisableWebAndMCP(t *testing.T) {
