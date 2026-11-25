@@ -98,6 +98,8 @@ type KazumiDownload struct {
 	Path        string `json:"path"`
 	Status      int    `json:"status"`
 	Size        int64  `json:"size"`
+	TotalSize   int64  `json:"total_size"`
+	Progress    int    `json:"progress"`
 	Speed       int64  `json:"speed"`
 	Error       string `json:"error"`
 	CreatedTime int64  `json:"created_time"`
@@ -254,6 +256,8 @@ func (d *DB) Init() error {
 			path TEXT NOT NULL DEFAULT '',
 			status INTEGER NOT NULL DEFAULT 0,
 			size INTEGER NOT NULL DEFAULT 0,
+			total_size INTEGER NOT NULL DEFAULT 0,
+			progress INTEGER NOT NULL DEFAULT 0,
 			speed INTEGER NOT NULL DEFAULT 0,
 			error TEXT NOT NULL DEFAULT '',
 			created_time INTEGER NOT NULL DEFAULT 0,
@@ -296,6 +300,8 @@ func (d *DB) Init() error {
 	_ = d.ensureColumn("followed", "display_name", "TEXT NOT NULL DEFAULT ''")
 	_ = d.ensureColumn("download", "task_id", "TEXT")
 	_ = d.ensureColumn("kazumi_download", "bangumi_id", "INTEGER NOT NULL DEFAULT 0")
+	_ = d.ensureColumn("kazumi_download", "total_size", "INTEGER NOT NULL DEFAULT 0")
+	_ = d.ensureColumn("kazumi_download", "progress", "INTEGER NOT NULL DEFAULT 0")
 	_ = d.ensureColumn("kazumi_download", "speed", "INTEGER NOT NULL DEFAULT 0")
 	_ = d.ensureColumn("scripts", "episodes", "TEXT NOT NULL DEFAULT '[]'")
 	_ = d.ensureColumn("scripts", "updated_time", "INTEGER NOT NULL DEFAULT 0")
@@ -1129,12 +1135,12 @@ func (d *DB) DeleteAllManualBangumi() error {
 	return err
 }
 
-const kazumiDownloadColumns = "id, name, bangumi_id, episode, title, rule, source, media_url, path, status, size, speed, error, created_time, updated_time"
+const kazumiDownloadColumns = "id, name, bangumi_id, episode, title, rule, source, media_url, path, status, size, total_size, progress, speed, error, created_time, updated_time"
 
 func scanKazumiDownload(scanner interface{ Scan(...any) error }) (KazumiDownload, error) {
 	var item KazumiDownload
 	err := scanner.Scan(&item.ID, &item.Name, &item.BangumiID, &item.Episode, &item.Title, &item.Rule, &item.Source,
-		&item.MediaURL, &item.Path, &item.Status, &item.Size, &item.Speed, &item.Error, &item.CreatedTime, &item.UpdatedTime)
+		&item.MediaURL, &item.Path, &item.Status, &item.Size, &item.TotalSize, &item.Progress, &item.Speed, &item.Error, &item.CreatedTime, &item.UpdatedTime)
 	return item, err
 }
 
@@ -1146,10 +1152,10 @@ func (d *DB) SaveKazumiDownload(item *KazumiDownload) error {
 	item.UpdatedTime = time.Now().Unix()
 	if item.ID == 0 {
 		res, err := d.Exec(
-			`INSERT INTO kazumi_download (name, bangumi_id, episode, title, rule, source, media_url, path, status, size, speed, error, created_time, updated_time)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO kazumi_download (name, bangumi_id, episode, title, rule, source, media_url, path, status, size, total_size, progress, speed, error, created_time, updated_time)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			item.Name, item.BangumiID, item.Episode, item.Title, item.Rule, item.Source, item.MediaURL, item.Path,
-			item.Status, item.Size, item.Speed, item.Error, item.CreatedTime, item.UpdatedTime,
+			item.Status, item.Size, item.TotalSize, item.Progress, item.Speed, item.Error, item.CreatedTime, item.UpdatedTime,
 		)
 		if err != nil {
 			return err
@@ -1158,9 +1164,9 @@ func (d *DB) SaveKazumiDownload(item *KazumiDownload) error {
 		return nil
 	}
 	_, err := d.Exec(
-		`UPDATE kazumi_download SET name=?, bangumi_id=?, episode=?, title=?, rule=?, source=?, media_url=?, path=?, status=?, size=?, speed=?, error=?, updated_time=? WHERE id=?`,
+		`UPDATE kazumi_download SET name=?, bangumi_id=?, episode=?, title=?, rule=?, source=?, media_url=?, path=?, status=?, size=?, total_size=?, progress=?, speed=?, error=?, updated_time=? WHERE id=?`,
 		item.Name, item.BangumiID, item.Episode, item.Title, item.Rule, item.Source, item.MediaURL, item.Path,
-		item.Status, item.Size, item.Speed, item.Error, item.UpdatedTime, item.ID,
+		item.Status, item.Size, item.TotalSize, item.Progress, item.Speed, item.Error, item.UpdatedTime, item.ID,
 	)
 	return err
 }

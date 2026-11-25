@@ -278,3 +278,25 @@ func TestMacCMSPageURLBeatsAdPlayer(t *testing.T) {
 		t.Fatalf("input=%q media=%v", input, media)
 	}
 }
+
+func TestIsMediaURLOnlyChecksPath(t *testing.T) {
+	wrapper := "https://pl.example.com/addons/aplyer/atom.php?key=0&url=https%3A%2F%2Fcdn.example.com%2F08%2Fplaylist.m3u8"
+	if IsMediaURL(wrapper) {
+		t.Fatalf("wrapper page was treated as media: %s", wrapper)
+	}
+	if !IsMediaURL("https://cdn.example.com/08/playlist.m3u8?token=abc") {
+		t.Fatal("direct m3u8 URL was not recognized")
+	}
+}
+
+func TestResolvePlaybackUnwrapsQueryMediaURL(t *testing.T) {
+	media := "https://cdn.example.com/08/playlist.m3u8"
+	wrapper := "https://pl.example.com/addons/aplyer/atom.php?key=0&url=" + url.QueryEscape(media)
+	input, direct, _, err := ResolvePlayback(&Rule{Name: "test"}, wrapper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !direct || input != media {
+		t.Fatalf("input=%q media=%v, want %q", input, direct, media)
+	}
+}

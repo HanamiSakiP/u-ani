@@ -28,12 +28,43 @@ func staticHandler(root string, fallbackIndex bool) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		switch strings.ToLower(filepath.Ext(path)) {
+		ext := strings.ToLower(filepath.Ext(path))
+		switch ext {
 		case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico", ".avif":
 			w.Header().Set("Cache-Control", "public, max-age=604800, stale-while-revalidate=86400")
 		}
+		// Go's MIME table does not know every video container on every system.
+		// Browsers are much more willing to play a file when the container gets
+		// the correct Content-Type, and .ts/.mkv especially are otherwise served
+		// as application/octet-stream.
+		if contentType := videoContentType(ext); contentType != "" {
+			w.Header().Set("Content-Type", contentType)
+		}
 		files.ServeHTTP(w, r)
 	})
+}
+
+func videoContentType(ext string) string {
+	switch ext {
+	case ".mp4", ".m4v":
+		return "video/mp4"
+	case ".webm":
+		return "video/webm"
+	case ".mkv":
+		return "video/x-matroska"
+	case ".ts":
+		return "video/mp2t"
+	case ".mov":
+		return "video/quicktime"
+	case ".flv":
+		return "video/x-flv"
+	case ".avi":
+		return "video/x-msvideo"
+	case ".rmvb":
+		return "application/vnd.rn-realmedia-vbr"
+	default:
+		return ""
+	}
 }
 
 func spaHandler(root string) http.Handler {

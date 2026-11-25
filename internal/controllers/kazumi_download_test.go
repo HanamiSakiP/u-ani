@@ -23,12 +23,20 @@ func TestKazumiFilesListAndDelete(t *testing.T) {
 	if err := os.WriteFile(path, []byte("video"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	for _, name := range []string{".uani-1-1.mp4", ".uani-backup-1-1-0.mp4"} {
+		if err := os.WriteFile(filepath.Join(filepath.Dir(path), name), []byte("staging"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	files, err := ListKazumiFiles()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(files) != 1 || files[0].Path != "测试番剧/1.mp4" || files[0].Size != 5 {
 		t.Fatalf("unexpected files: %#v", files)
+	}
+	for _, name := range []string{".uani-1-1.mp4", ".uani-backup-1-1-0.mp4"} {
+		_ = os.Remove(filepath.Join(filepath.Dir(path), name))
 	}
 	if _, err := KazumiFileAbs("../escape.mp4"); err == nil {
 		t.Fatal("expected path traversal to be rejected")

@@ -248,6 +248,30 @@ func splitHLSAttrs(value string) []string {
 }
 
 func fetchHLSBytes(ctx context.Context, rawURL string, headers map[string]string) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if attempt > 0 {
+			timer := time.NewTimer(time.Duration(attempt) * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
+		}
+		data, err := fetchHLSBytesOnce(ctx, rawURL, headers)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+func fetchHLSBytesOnce(ctx context.Context, rawURL string, headers map[string]string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)

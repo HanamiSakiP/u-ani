@@ -231,15 +231,65 @@ func filterMinorRoads(roads []Road) []Road {
 	return kept
 }
 
-// IsMediaURL reports whether a URL already points at a media file.
+// IsMediaURL reports whether a URL path already points at a media file.
+// Only the path is inspected: player wrappers commonly put the real stream in
+// a query parameter (for example atom.php?url=https%3A%2F%2F...%2Fplaylist.m3u8),
+// and treating that page as media made the downloader hand the HTML wrapper to
+// yt-dlp/ffmpeg, where it produced no bytes and appeared stuck at 0%.
 func IsMediaURL(raw string) bool {
-	lower := strings.ToLower(raw)
+	value := raw
+	if parsed, err := url.Parse(strings.TrimSpace(raw)); err == nil && (parsed.Host != "" || parsed.Path != "") {
+		value = parsed.Path
+	}
+	lower := strings.ToLower(value)
 	for _, ext := range []string{".m3u8", ".mp4", ".flv", ".mkv", ".webm"} {
 		if strings.Contains(lower, ext) {
 			return true
 		}
 	}
 	return false
+}
+
+// mediaURLFromWrapper extracts a direct media URL from a player wrapper's query
+// parameters. Wrappers such as /addons/aplyer/atom.php?key=0&url=<encoded m3u8>
+// only exist to hide the real stream behind an HTML page; the downloader should
+// receive the decoded stream instead of the wrapper page.
+func mediaURLFromWrapper(raw string, depth int) string {
+	if depth > 3 {
+		return ""
+	}
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	if IsMediaURL(raw) {
+		return raw
+	}
+	for _, values := range parsed.Query() {
+		for _, value := range values {
+			candidate := strings.TrimSpace(value)
+			if candidate == "" {
+				continue
+			}
+			// Query() already decodes once; one more round covers wrappers that
+			// receive an encoded URL inside another encoded URL.
+			for i := 0; i < 2 && strings.Contains(candidate, "%"); i++ {
+				decoded, err := url.QueryUnescape(candidate)
+				if err != nil || decoded == candidate {
+					break
+				}
+				candidate = decoded
+			}
+			lower := strings.ToLower(candidate)
+			if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+				continue
+			}
+			if media := mediaURLFromWrapper(candidate, depth+1); media != "" {
+				return media
+			}
+		}
+	}
+	return ""
 }
 
 // ResolveMediaURL looks for a direct media URL in an episode page. It is a
@@ -277,6 +327,9 @@ func resolvePlaybackURL(rule *Rule, pageURL string, depth int, visited map[strin
 	// and end with "no playable URL"; hand it straight to the player instead.
 	if IsMediaURL(pageURL) {
 		return pageURL, true, "", nil
+	}
+	if wrapped := mediaURLFromWrapper(pageURL, 0); wrapped != "" {
+		return wrapped, true, "", nil
 	}
 	visited[pageURL] = true
 	headers := ruleHeaders(rule)

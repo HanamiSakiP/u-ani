@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -160,8 +161,13 @@ func adminKazumiRetryDownload(w http.ResponseWriter, r *http.Request, rawID stri
 		writeError(w, http.StatusBadRequest, "invalid task id")
 		return
 	}
-	task, err := controllers.RetryKazumiDownload(id)
+	force := r.URL.Query().Get("force") == "1" || strings.EqualFold(r.URL.Query().Get("force"), "true")
+	task, err := controllers.RetryKazumiDownload(id, force)
 	if err != nil {
+		if errors.Is(err, controllers.ErrKazumiAlreadyDownloaded) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
